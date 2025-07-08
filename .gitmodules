@@ -1,0 +1,18 @@
+[submodule "frameworks/mpeg-pcc-tmc13"]
+	path = frameworks/mpeg-pcc-tmc13
+	url = https://github.com/MPEGGroup/mpeg-pcc-tmc13.git
+[submodule "frameworks/PccAI"]
+	path = frameworks/PccAI
+	url = https://github.com/InterDigitalInc/PccAI.git
+[submodule "frameworks/pcc_geo_cnn_v2"]
+	path = frameworks/pcc_geo_cnn_v2
+	url = https://github.com/mauriceqch/pcc_geo_cnn_v2.git
+[submodule "frameworks/Point-cloud-compression-by-RNN"]
+	path = frameworks/Point-cloud-compression-by-RNN
+	url = https://github.com/ChenxiTU/Point-cloud-compression-by-RNN.git
+[submodule "frameworks/PCGCv1"]
+	path = frameworks/PCGCv1
+	url = https://github.com/NJUVISION/PCGCv1.git
+[submodule "frameworks/learned-point-cloud-compression-for-classification"]
+	path = frameworks/learned-point-cloud-compression-for-classification
+	url = https://github.com/multimedialabsfu/learned-point-cloud-compression-for-classification.git
