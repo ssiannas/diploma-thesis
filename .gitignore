@@ -12,6 +12,7 @@ environments/
 thesis_env/
 venv/
 ENV/
+.venv/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -41,6 +42,3 @@ models/*.h5
 # OS
 .DS_Store
 Thumbs.db
-
-# External frameworks (they have their own git)
-frameworks/*/
