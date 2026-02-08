@@ -1,0 +1,66 @@
+repos:
+  # -------------------------
+  # Basic hygiene
+  # -------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+
+  # -------------------------
+  # Formatting (matches `make format`)
+  # -------------------------
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black
+        language_version: python3
+
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+
+  # -------------------------
+  # Linting (matches `make lint`)
+  # -------------------------
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.0.0
+    hooks:
+      - id: flake8
+
+  # Pylint and mypy disabled for now - too many false positives
+  # TODO: Re-enable after fixing all type hints
+  # - repo: https://github.com/PyCQA/pylint
+  #   rev: v3.2.7
+  #   hooks:
+  #     - id: pylint
+  #       args:
+  #         - "--disable=R,C"
+  #       additional_dependencies:
+  #         - pylint
+
+  # -------------------------
+  # Type checking (matches `make type-check`)
+  # -------------------------
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.11.2
+  #   hooks:
+  #     - id: mypy
+  #     additional_dependencies: []
+
+  # -------------------------
+  # Tests (optional, lightweight)
+  # -------------------------
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest (fast)
+        entry: make test
+        language: system
+        pass_filenames: false
+        stages: [manual]

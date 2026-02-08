@@ -7,7 +7,17 @@ __pycache__/
 environments/
 *.egg-info/
 .pytest_cache/
-pyrightconfig.json
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+
+# Claude Code files (tracked)
+.claude/
+
+# Development docs (local tracking only)
+.docs/
 
 # Virtual environments
 thesis_env/
