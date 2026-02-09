@@ -39,10 +39,14 @@ datasets/*.ply
 datasets/*.pcd
 datasets/*.las
 
-# Model checkpoints
-models/*.pth
-models/*.pkl
-models/*.h5
+# Model checkpoints (everything except directory structure docs)
+models/baselines/
+models/pretrained/
+models/final/
+*.pth
+*.pkl
+*.h5
+*.ckpt
 
 # IDE
 .vscode/

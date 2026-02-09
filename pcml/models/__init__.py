@@ -7,12 +7,15 @@ from pcml.models.losses import (
     ColorReconstructionLoss,
     PointCloudReconstructionLoss,
 )
+from pcml.models.simple import SimpleAutoencoder, SimpleCompressionModel
 
 __all__ = [
     "BaseCompressionModel",
     "CompressionOutput",
     "BaselineCompressionModel",
     "PointCloudAutoencoder",
+    "SimpleAutoencoder",
+    "SimpleCompressionModel",
     "ChamferDistance",
     "PointCloudReconstructionLoss",
     "ColorReconstructionLoss",
