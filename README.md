@@ -32,9 +32,7 @@ make test
 |--------|------|--------|-------------|
 | **G-PCC (TMC13)** | Traditional | ✅ Working | 14 BPP lossless, inf PSNR |
 | **Simple Baseline** | MLP Autoencoder | ✅ Trained | 28.1 dB PSNR, 0.019 loss |
-| **pcc_geo_cnn_v2** | Learned CNN | 🔧 Ready* | Pending models setup |
-
-*Adapter implemented, TensorFlow 1.15 installed in conda env `pcc_geo_cnn`
+| **pcc_geo_cnn_v2** | Learned CNN | ✅ Working | 36 BPP, 53 dB PSNR (c1 model) |
 
 ### Infrastructure
 - ✅ Data loaders (PLY format)
@@ -63,6 +61,7 @@ diploma-thesis/
 ├── frameworks/                # External codecs (submodules)
 │   ├── mpeg-pcc-tmc13/        # G-PCC (C++)
 │   └── pcc_geo_cnn_v2/        # Learned compression (TF 1.15)
+│       └── models/            # → Symlink to Shared Drive
 │
 ├── scripts/                   # Executable scripts
 │   ├── demo_gpcc.py           # Test G-PCC
@@ -77,6 +76,21 @@ diploma-thesis/
 ├── results/                   # Outputs (gitignored)
 └── tests/                     # Unit tests
 ```
+
+### External Storage (Shared Drive)
+
+Large datasets and pretrained models are stored on an external drive:
+
+**Location**: `/media/ssiannas/Shared Driv/` (always mounted)
+
+**Contents**:
+- `pcc_geo_cnn_v2/models/` - Pretrained CNN models (c1, c2, c3p variants, c4-ws)
+- `pcc_geo_cnn_v2/` - Additional datasets (longdress, loot, soldier, etc.)
+- `jpeg-pleno/` - JPEG Pleno point cloud datasets
+- Other pretrained models
+
+**Symlinks**:
+- `frameworks/pcc_geo_cnn_v2/models` → `/media/ssiannas/Shared Driv/pcc_geo_cnn_v2/models`
 
 ---
 
@@ -106,22 +120,12 @@ python3 scripts/quick_train_simple.py
 
 ### Test Learned Compression (pcc_geo_cnn_v2)
 ```bash
-# Requires: TensorFlow 1.15 (conda env), pretrained models
+# Uses TensorFlow 1.15 in conda env (called via subprocess)
 source .venv/bin/activate
 python3 scripts/test_pcc_geo_cnn_v2.py
 ```
 
-**Setup if needed**:
-```bash
-# Create conda environment
-conda create -n pcc_geo_cnn python=3.6.9 -y
-conda activate pcc_geo_cnn
-conda install tensorflow-gpu=1.15.0 -c conda-forge -y
-pip install tensorflow-compression==1.3 pandas matplotlib numpy plyfile pyyaml tqdm
-
-# Models should be symlinked at: frameworks/pcc_geo_cnn_v2/models/
-# Expected structure: c1/, c2/, c3/, c4/, c5/, c6/ (quality levels)
-```
+**Results**: ~125s compression, 53 dB PSNR, 36 BPP (c1 model on 10K points)
 
 ---
 
@@ -188,23 +192,24 @@ See `METRICS_RATIONALE.md` for detailed explanation of why we use different metr
 
 ## Results
 
-Current performance (on longdress_vox10_1300.ply):
+Current performance (on longdress_vox10_1300.ply, 10K point subset):
 
-| Method | BPP | PSNR (dB) | Status |
-|--------|-----|-----------|--------|
-| G-PCC (lossless) | 14.0 | ∞ | ✅ Tested |
-| Simple Baseline | TBD | 28.1 | ✅ Trained |
-| pcc_geo_cnn_v2 | TBD | TBD | 🔧 Ready |
+| Method | BPP | PSNR (dB) | Compression Time | Status |
+|--------|-----|-----------|------------------|--------|
+| G-PCC (lossless) | 14.0 | ∞ | <1s | ✅ Tested |
+| Simple Baseline | TBD | 28.1 | ~30min (training) | ✅ Trained |
+| pcc_geo_cnn_v2 (c1) | 36.1 | 53.0 | 126s | ✅ Tested |
 
 ---
 
 ## Next Steps
 
-1. Setup pcc_geo_cnn_v2 models (symlink or download)
-2. Test pcc_geo_cnn_v2 compression
-3. Create benchmark comparison script
-4. Generate rate-distortion curves
-5. Full evaluation on test set
+1. ~~Setup pcc_geo_cnn_v2~~ ✅ Done
+2. ~~Test pcc_geo_cnn_v2~~ ✅ Done
+3. Create benchmark comparison script (compare all 3 methods)
+4. Test multiple quality levels (c1, c2, c3p variants, c4-ws)
+5. Generate rate-distortion curves
+6. Full evaluation on complete test set
 
 ---
 
