@@ -85,9 +85,11 @@ Large datasets and pretrained models are stored on an external drive:
 
 **Contents**:
 - `pcc_geo_cnn_v2/models/` - Pretrained CNN models (c1, c2, c3p variants, c4-ws)
-- `pcc_geo_cnn_v2/` - Additional datasets (longdress, loot, soldier, etc.)
-- `jpeg-pleno/` - JPEG Pleno point cloud datasets
-- Other pretrained models
+- `pcc_geo_cnn_v2/` - Sample point clouds (longdress, loot, soldier, etc.)
+- `jpeg-pleno/` - 8iVFB dataset (full JPEG Pleno sequences: longdress, loot, redandblack, soldier)
+- Other pretrained models and datasets
+
+**Note**: 8iVFB dataset = JPEG Pleno point cloud dataset. Small test subset in `datasets/8iVFB_small/`, full dataset on Shared Drive.
 
 **Symlinks**:
 - `frameworks/pcc_geo_cnn_v2/models` → `/media/ssiannas/Shared Driv/pcc_geo_cnn_v2/models`
