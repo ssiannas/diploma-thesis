@@ -194,25 +194,66 @@ See `METRICS_RATIONALE.md` for detailed explanation of why we use different metr
 
 ## Results
 
-Current performance (on longdress_vox10_1300.ply, 10K point subset):
+Current benchmark results (longdress_vox10_1300.ply, 5K points):
 
-| Method | BPP | PSNR (dB) | Compression Time | Status |
-|--------|-----|-----------|------------------|--------|
-| G-PCC (lossless) | 14.0 | ∞ | <1s | ✅ Tested |
-| Simple Baseline | TBD | 28.1 | ~30min (training) | ✅ Trained |
-| pcc_geo_cnn_v2 (c1) | 36.1 | 53.0 | 126s | ✅ Tested |
+| Method | Config | BPP | PSNR (dB) | Compression Time | Status |
+|--------|--------|-----|-----------|------------------|--------|
+| G-PCC | lossless | 14.0 | ∞ | <1s | ✅ Working |
+| pcc_geo_cnn_v2 | c1 | 65.95 | 51.64 | 110s | ✅ Tested |
+| pcc_geo_cnn_v2 | c2 | 31.97 | 52.34 | 121s | ✅ Tested |
+| pcc_geo_cnn_v2 | c3p | 50.53 | 53.64 | 230s | ✅ Tested |
+| Simple Baseline | trained | TBD | 28.1 | ~30min (training) | ✅ Trained |
+
+**Best quality**: c3p (53.64 dB @ 50.5 BPP)
+**Most efficient**: c2 (52.34 dB @ 32.0 BPP)
+
+### Running Complete Benchmark
+
+To generate full rate-distortion curves with all methods:
+
+```bash
+source .venv/bin/activate
+
+# Complete benchmark (all methods, 10K points, ~1-2 hours)
+python3 scripts/benchmark_all_methods.py \
+  --num-points 10000 \
+  --cnn-models c1 c2 c3 c3p \
+  --output results/benchmark/full_comparison.json
+
+# Generate visualizations
+python3 scripts/plot_rd_curves.py \
+  --input results/benchmark/full_comparison.json \
+  --multi  # Creates multi-metric comparison plot
+```
+
+**Available models:**
+- G-PCC: lossless (always included unless `--skip-gpcc`)
+- pcc_geo_cnn_v2: c1, c2, c3, c3p (c3 not yet tested)
+- Simple Baseline: not in benchmark script yet
+
+**Note**: c4-ws exists in models directory but not in framework code (cannot use without modification).
 
 ---
 
 ## Next Steps
 
-1. ~~Setup pcc_geo_cnn_v2~~ ✅ Done
-2. ~~Test pcc_geo_cnn_v2~~ ✅ Done
-3. ~~Create benchmark comparison script~~ ✅ Done
-4. Test remaining quality levels (c3p variants, c4-ws)
-5. Generate rate-distortion curve visualization
-6. Train baseline models on full 8iVFB dataset
-7. Full evaluation and comparison
+### Immediate (Ready to Run)
+1. ✅ ~~Setup all frameworks~~
+2. ✅ ~~Test pcc_geo_cnn_v2 models (c1, c2, c3p)~~
+3. ✅ ~~Create benchmark comparison script~~
+4. ✅ ~~Generate RD curve visualization~~
+5. **Run complete benchmark** (c1, c2, c3, c3p + G-PCC on 10K points)
+
+### Short-term
+6. Test c3 model (only untested model)
+7. Add Simple Baseline to benchmark script
+8. Multi-frame evaluation (all 8iVFB sequences)
+9. Full-scale testing (100K+ points)
+
+### Long-term
+10. Train new models on full 8iVFB dataset
+11. Implement advanced architectures
+12. Final thesis evaluation and comparison
 
 ---
 
