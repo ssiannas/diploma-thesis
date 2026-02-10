@@ -208,10 +208,11 @@ Current performance (on longdress_vox10_1300.ply, 10K point subset):
 
 1. ~~Setup pcc_geo_cnn_v2~~ ✅ Done
 2. ~~Test pcc_geo_cnn_v2~~ ✅ Done
-3. Create benchmark comparison script (compare all 3 methods)
-4. Test multiple quality levels (c1, c2, c3p variants, c4-ws)
-5. Generate rate-distortion curves
-6. Full evaluation on complete test set
+3. ~~Create benchmark comparison script~~ ✅ Done
+4. Test remaining quality levels (c3p variants, c4-ws)
+5. Generate rate-distortion curve visualization
+6. Train baseline models on full 8iVFB dataset
+7. Full evaluation and comparison
 
 ---
 
