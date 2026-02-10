@@ -8,39 +8,40 @@ Benchmarking framework for evaluating ML-based point cloud compression methods.
 
 ## Quick Start
 
-### 1. Setup Main Environment (PyTorch 2.0)
-
 ```bash
-# Clone repository
-git clone <repo-url>
-cd diploma-thesis
-
-# Create virtual environment
+# Setup
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Install package in editable mode
 pip install -e .
+
+# Test what works
+python3 scripts/demo_gpcc.py                                    # G-PCC codec
+python3 scripts/quick_train_simple.py --num-frames 5 --epochs 10  # Train baseline
 
 # Run tests
 make test
 ```
 
-### 2. Test What's Working
+---
 
-```bash
-# Activate venv
-source .venv/bin/activate
+## Current Status
 
-# Test G-PCC (traditional codec)
-python3 scripts/demo_gpcc.py
+### Working Methods
+| Method | Type | Status | Performance |
+|--------|------|--------|-------------|
+| **G-PCC (TMC13)** | Traditional | ✅ Working | 14 BPP lossless, inf PSNR |
+| **Simple Baseline** | MLP Autoencoder | ✅ Trained | 28.1 dB PSNR, 0.019 loss |
+| **pcc_geo_cnn_v2** | Learned CNN | 🔧 Ready* | Pending models setup |
 
-# Train simple baseline
-python3 scripts/quick_train_simple.py --num-frames 5 --epochs 10
-```
+*Adapter implemented, TensorFlow 1.15 installed in conda env `pcc_geo_cnn`
+
+### Infrastructure
+- ✅ Data loaders (PLY format)
+- ✅ Metrics (PSNR, MSE, D1, D2, Hausdorff)
+- ✅ Visualization tools
+- ✅ Testing framework
+- ✅ Framework adapter pattern
 
 ---
 
@@ -49,48 +50,39 @@ python3 scripts/quick_train_simple.py --num-frames 5 --epochs 10
 ```
 diploma-thesis/
 ├── pcml/                      # Main package
-│   ├── data/                  # Data loaders (PLY, etc.)
-│   ├── metrics/               # PSNR, MSE, D1, D2
+│   ├── data/                  # Point cloud loaders
+│   ├── metrics/               # Quality & compression metrics
 │   ├── models/                # Baseline models
-│   ├── frameworks/            # Framework adapters
+│   ├── frameworks/            # External codec adapters
+│   │   ├── base.py            # Base adapter interface
+│   │   ├── gpcc.py            # G-PCC (working)
+│   │   └── pcc_geo_cnn_v2.py  # Learned CNN (ready)
 │   ├── training/              # Training utilities
 │   └── visualization/         # Plotting tools
 │
-├── frameworks/                # External codecs (git submodules)
-│   ├── mpeg-pcc-tmc13/       # G-PCC (C++)
-│   ├── pcc_geo_cnn_v2/       # Learned compression (TF 1.15)
-│   ├── learned-pcc/          # PointNet compression (PyTorch)
-│   └── PccAI/                # MPEG framework (PyTorch)
+├── frameworks/                # External codecs (submodules)
+│   ├── mpeg-pcc-tmc13/        # G-PCC (C++)
+│   └── pcc_geo_cnn_v2/        # Learned compression (TF 1.15)
 │
-├── scripts/                   # Training/testing scripts
+├── scripts/                   # Executable scripts
+│   ├── demo_gpcc.py           # Test G-PCC
+│   ├── test_gpcc_configs.py   # Multi-config G-PCC
+│   ├── quick_train_simple.py  # Train baseline
+│   └── test_pcc_geo_cnn_v2.py # Test learned CNN
+│
 ├── datasets/                  # Point cloud data (gitignored)
+│   └── 8iVFB_small/           # Test data (included)
+│
 ├── models/                    # Checkpoints (gitignored)
 ├── results/                   # Outputs (gitignored)
-│
-├── .docs/                     # Documentation
-├── tests/                     # Unit tests
-├── requirements.txt           # Main dependencies
-└── Makefile                   # Common commands
+└── tests/                     # Unit tests
 ```
-
----
-
-## Supported Methods
-
-| Method | Type | Status | Environment |
-|--------|------|--------|-------------|
-| **G-PCC (TMC13)** | Traditional | ✅ Working | Main |
-| **Simple Baseline** | MLP Autoencoder | ✅ Trained | Main |
-| **pcc_geo_cnn_v2** | Learned (CNN) | 🔄 Setup | Conda (TF 1.15) |
-| **learned-pcc** | PointNet + CompressAI | ⏳ Needs training | Conda (PyTorch 1.13) |
-| **PccAI** | Framework | ⏳ Custom | Conda (PyTorch 1.8) |
 
 ---
 
 ## Usage
 
-### Test G-PCC (Ready Now)
-
+### Test G-PCC (Traditional Codec)
 ```bash
 source .venv/bin/activate
 
@@ -99,12 +91,9 @@ python3 scripts/demo_gpcc.py
 
 # Multiple configs
 python3 scripts/test_gpcc_configs.py
-
-# Results in: results/gpcc_demo/
 ```
 
 ### Train Baseline Model
-
 ```bash
 source .venv/bin/activate
 
@@ -113,88 +102,87 @@ python3 scripts/quick_train_simple.py --num-frames 5 --epochs 10
 
 # Full training (20 frames, 50 epochs, ~30 min)
 python3 scripts/quick_train_simple.py
-
-# Checkpoints in: models/baselines/simple_quick/
 ```
 
-### Setup Additional Frameworks
-
-For frameworks requiring separate environments (TensorFlow 1.x):
-
+### Test Learned Compression (pcc_geo_cnn_v2)
 ```bash
-# pcc_geo_cnn_v2 (has pretrained models)
-./scripts/setup_pcc_geo_cnn_v2.sh
-
-# Then download models from Google Drive
-# See: .docs/SETUP.md
+# Requires: TensorFlow 1.15 (conda env), pretrained models
+source .venv/bin/activate
+python3 scripts/test_pcc_geo_cnn_v2.py
 ```
 
----
-
-## Datasets
-
-### Recommended: 8iVFB Dataset
-
+**Setup if needed**:
 ```bash
-# Download from: http://plenodb.jpeg.org/
-# Extract to: datasets/8iVFB/
+# Create conda environment
+conda create -n pcc_geo_cnn python=3.6.9 -y
+conda activate pcc_geo_cnn
+conda install tensorflow-gpu=1.15.0 -c conda-forge -y
+pip install tensorflow-compression==1.3 pandas matplotlib numpy plyfile pyyaml tqdm
 
-# Small subset for testing (already included):
-datasets/8iVFB_small/
-├── longdress_vox10_1300.ply
-├── longdress_vox10_1301.ply
-└── ...
+# Models should be symlinked at: frameworks/pcc_geo_cnn_v2/models/
+# Expected structure: c1/, c2/, c3/, c4/, c5/, c6/ (quality levels)
 ```
 
 ---
 
 ## Development
 
-### Run Tests
-
 ```bash
-make test              # Run all tests
+# Run tests
+make test              # All tests
 make test-verbose      # Verbose output
-make coverage          # Generate coverage report
-```
+make coverage          # Coverage report
 
-### Code Quality
+# Code quality
+make lint              # flake8
+make format            # black formatter
 
-```bash
-make lint              # Run flake8
-make format            # Run black formatter
-```
-
-### Useful Commands
-
-```bash
-make help              # Show all commands
+# Other commands
+make help              # Show all targets
 make clean             # Remove cache/artifacts
-make train-baseline    # Train baseline model
 ```
 
 ---
 
-## Environment Strategy
+## Environments
 
-**Main Environment (.venv)**: PyTorch 2.0, Python 3.10
-- Use for: baseline models, G-PCC, benchmarking
-- **Default for all work**
+**Main (.venv)**: Python 3.10, PyTorch 2.0
+- Default for all work
+- Baseline models, G-PCC, benchmarking
+- Use: `source .venv/bin/activate`
 
-**Conda Environments**: Only for legacy frameworks
-- `pcc_geo_cnn` - TensorFlow 1.15, Python 3.6
-- `learned_pcc` - PyTorch 1.13, Python 3.10
-- `pccai` - PyTorch 1.8, Python 3.8
+**Conda (pcc_geo_cnn)**: Python 3.6, TensorFlow 1.15
+- Only for pcc_geo_cnn_v2 framework
+- Called via subprocess by main env
+- Use: `conda activate pcc_geo_cnn`
 
-**Activate main env:**
-```bash
-source .venv/bin/activate
-```
+---
 
-**Activate conda env (when needed):**
-```bash
-conda activate pcc_geo_cnn
-```
+## Metrics
+
+### Training
+- **Chamfer Distance**: Bidirectional mean distance for smooth gradients
+
+### Evaluation (MPEG Standard)
+- **MSE/PSNR**: Overall quality assessment
+- **D1**: One-directional max distance
+- **D2**: Bidirectional max distance (Hausdorff)
+- **BPP**: Bits per point (compression rate)
+
+See `METRICS_RATIONALE.md` for detailed explanation of why we use different metrics for training vs evaluation.
+
+---
+
+## Documentation
+
+- `README.md` (this file) - Start here
+- `METRICS_RATIONALE.md` - Why our metric choices
+- `.docs/` - Additional documentation
+  - `CORE_PHILOSOPHY.md` - Development principles
+  - `CODE_STYLE.md` - Style guidelines
+  - `PROJECT_TIMELINE.md` - Progress tracker
+  - `SETUP.md` - Detailed setup
+  - `FRAMEWORKS.md` - Framework comparison
 
 ---
 
@@ -202,53 +190,37 @@ conda activate pcc_geo_cnn
 
 Current performance (on longdress_vox10_1300.ply):
 
-| Method | BPP | PSNR (dB) | MSE | Notes |
-|--------|-----|-----------|-----|-------|
-| G-PCC (lossless) | 14.0 | ∞ | 0.0 | Perfect reconstruction |
-| Simple Baseline | TBD | 28.1 | 0.019 | Trained on 20 frames |
+| Method | BPP | PSNR (dB) | Status |
+|--------|-----|-----------|--------|
+| G-PCC (lossless) | 14.0 | ∞ | ✅ Tested |
+| Simple Baseline | TBD | 28.1 | ✅ Trained |
+| pcc_geo_cnn_v2 | TBD | TBD | 🔧 Ready |
 
 ---
 
-## Documentation
+## Next Steps
 
-See `.docs/` for detailed documentation:
+1. Setup pcc_geo_cnn_v2 models (symlink or download)
+2. Test pcc_geo_cnn_v2 compression
+3. Create benchmark comparison script
+4. Generate rate-distortion curves
+5. Full evaluation on test set
 
-- **SETUP.md** - Detailed setup instructions
-- **FRAMEWORKS.md** - Framework comparison & setup
-- **CORE_PHILOSOPHY.md** - Development principles
-- **PROJECT_TIMELINE.md** - Current progress & roadmap
+---
+
+## License
+
+[Specify license]
 
 ---
 
 ## Citation
 
 ```bibtex
-@mastersthesis{your_thesis_2026,
+@mastersthesis{thesis_2026,
   title={Point Cloud Compression using Machine Learning},
   author={Your Name},
   year={2026},
   school={Your University}
 }
-```
-
----
-
-## License
-
-[Your license here]
-
----
-
-## Conda Auto-Activation (Disabled)
-
-We disabled conda base auto-activation to keep the main venv as default.
-
-**To re-enable** (not recommended):
-```bash
-conda config --set auto_activate_base true
-```
-
-**Manual activation when needed:**
-```bash
-conda activate pcc_geo_cnn  # Or other env
 ```
