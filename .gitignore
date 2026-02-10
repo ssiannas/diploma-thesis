@@ -34,19 +34,54 @@ results/
 *.log
 *.tmp
 
-# Large datasets (track with Git LFS or external storage)
-datasets/*.ply
-datasets/*.pcd
-datasets/*.las
+# Large datasets (stored on shared drive, symlinked)
+datasets/8iVFB/
+datasets/ModelNet40/
+datasets/ShapeNet/
+datasets/**/*.ply
+datasets/**/*.pcd
+datasets/**/*.las
+datasets/**/*.xyz
+datasets/**/*.pts
+datasets/**/*.bin
+
+# Keep small test datasets
+!datasets/8iVFB_small/
+!datasets/ModelNet40_processed/
 
 # Model checkpoints (everything except directory structure docs)
-models/baselines/
-models/pretrained/
-models/final/
+models/baselines/*
+models/pretrained/*
+models/final/*
+!models/baselines/.gitkeep
+!models/pretrained/.gitkeep
+!models/final/.gitkeep
+!models/**/README.md
 *.pth
 *.pkl
 *.h5
 *.ckpt
+*.weights
+*.pb
+
+# Framework-specific models (pretrained weights, stored on shared drive)
+frameworks/**/models/
+frameworks/**/checkpoints/
+frameworks/**/weights/
+frameworks/**/pretrained/
+frameworks/**/*.pth
+frameworks/**/*.h5
+frameworks/**/*.ckpt
+frameworks/**/*.pb
+
+# Compressed archives (large downloads)
+*.zip
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tgz
+*.rar
+*.7z
 
 # IDE
 .vscode/

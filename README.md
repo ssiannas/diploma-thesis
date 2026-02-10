@@ -1,290 +1,254 @@
-# PCML - Point Cloud Machine Learning Framework
+# Point Cloud Compression with Machine Learning
 
-A comprehensive benchmarking framework for point cloud compression using machine learning techniques. This project is part of a diploma thesis focused on evaluating and comparing various ML-based point cloud compression methods.
+Benchmarking framework for evaluating ML-based point cloud compression methods.
 
-## Overview
+**Diploma Thesis** | February 2026
 
-PCML (Point Cloud Machine Learning) provides a unified framework for:
-- Loading and preprocessing point cloud datasets (JPEG Pleno, 8iVFB, etc.)
-- Implementing and benchmarking compression algorithms
-- Computing quality metrics (geometry and color)
-- Analyzing compression performance
+---
+
+## Quick Start
+
+### 1. Setup Main Environment (PyTorch 2.0)
+
+```bash
+# Clone repository
+git clone <repo-url>
+cd diploma-thesis
+
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install package in editable mode
+pip install -e .
+
+# Run tests
+make test
+```
+
+### 2. Test What's Working
+
+```bash
+# Activate venv
+source .venv/bin/activate
+
+# Test G-PCC (traditional codec)
+python3 scripts/demo_gpcc.py
+
+# Train simple baseline
+python3 scripts/quick_train_simple.py --num-frames 5 --epochs 10
+```
+
+---
 
 ## Project Structure
 
 ```
 diploma-thesis/
-├── pcml/                   # Main package source code
-│   ├── __init__.py
-│   ├── data/              # Data loaders and preprocessing
-│   │   ├── __init__.py
-│   │   ├── loaders.py     # Dataset loaders
-│   │   └── types.py       # Point cloud data structures
-│   └── metrics/           # Quality and compression metrics
-│       ├── __init__.py
-│       ├── compression.py # Compression metrics
-│       └── quality.py     # Quality metrics (PSNR, Hausdorff, etc.)
-├── tests/                 # Unit and integration tests
-│   ├── __init__.py
-│   ├── conftest.py        # Pytest fixtures
-│   ├── test_data.py       # Data loader tests
-│   └── test_metrics.py    # Metrics tests
-├── scripts/               # Utility scripts
-│   ├── validate_environment.py
-│   └── build_frameworks.bash
-├── notebooks/             # Jupyter notebooks for exploration
-├── configs/               # Configuration files (YAML/Hydra)
-├── datasets/              # Local datasets
-├── models/                # Trained model checkpoints
-├── results/               # Experiment outputs
-├── docs/                  # Documentation
-├── frameworks/            # ML compression frameworks (submodules)
-├── pyproject.toml         # Project metadata and dependencies
-├── setup.py               # Installation script
-├── requirements.txt       # Core dependencies
-├── requirements-dev.txt   # Development dependencies
-├── Makefile               # Useful commands
-└── README.md             # This file
+├── pcml/                      # Main package
+│   ├── data/                  # Data loaders (PLY, etc.)
+│   ├── metrics/               # PSNR, MSE, D1, D2
+│   ├── models/                # Baseline models
+│   ├── frameworks/            # Framework adapters
+│   ├── training/              # Training utilities
+│   └── visualization/         # Plotting tools
+│
+├── frameworks/                # External codecs (git submodules)
+│   ├── mpeg-pcc-tmc13/       # G-PCC (C++)
+│   ├── pcc_geo_cnn_v2/       # Learned compression (TF 1.15)
+│   ├── learned-pcc/          # PointNet compression (PyTorch)
+│   └── PccAI/                # MPEG framework (PyTorch)
+│
+├── scripts/                   # Training/testing scripts
+├── datasets/                  # Point cloud data (gitignored)
+├── models/                    # Checkpoints (gitignored)
+├── results/                   # Outputs (gitignored)
+│
+├── .docs/                     # Documentation
+├── tests/                     # Unit tests
+├── requirements.txt           # Main dependencies
+└── Makefile                   # Common commands
 ```
 
-## Requirements
+---
 
-- Python 3.8+
-- PyTorch 1.12+
-- CUDA (optional, for GPU acceleration)
-- See `requirements.txt` for full dependency list
+## Supported Methods
 
-## Installation
+| Method | Type | Status | Environment |
+|--------|------|--------|-------------|
+| **G-PCC (TMC13)** | Traditional | ✅ Working | Main |
+| **Simple Baseline** | MLP Autoencoder | ✅ Trained | Main |
+| **pcc_geo_cnn_v2** | Learned (CNN) | 🔄 Setup | Conda (TF 1.15) |
+| **learned-pcc** | PointNet + CompressAI | ⏳ Needs training | Conda (PyTorch 1.13) |
+| **PccAI** | Framework | ⏳ Custom | Conda (PyTorch 1.8) |
 
-### Quick Setup
-
-The easiest way to set up the development environment:
-
-```bash
-# Create virtual environment and install all dependencies
-make setup
-
-# Activate the virtual environment
-source .venv/bin/activate
-```
-
-### Manual Setup
-
-If you prefer manual installation:
-
-```bash
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Upgrade pip and install package
-pip install --upgrade pip setuptools wheel
-pip install -e ".[dev,jupyter]"
-pip install -r requirements-dev.txt
-
-# Install pre-commit hooks
-pre-commit install
-```
-
-### Installation Options
-
-```bash
-# Install core package only
-pip install -e .
-
-# Install with development tools
-pip install -e ".[dev]"
-
-# Install with Jupyter support
-pip install -e ".[jupyter]"
-
-# Install everything
-pip install -e ".[all]"
-```
+---
 
 ## Usage
 
-### Data Loading
+### Test G-PCC (Ready Now)
 
-```python
-from pcml.data import PLYPointCloudLoader
-from pcml.data.loaders import JPEGPleno8iVFBSequence, PointCloudDataset
+```bash
+source .venv/bin/activate
 
-# Load a single PLY file
-loader = PLYPointCloudLoader(verbose=True)
-point_cloud = loader.load("path/to/file.ply")
+# Single test
+python3 scripts/demo_gpcc.py
 
-# Load a sequence from JPEG Pleno dataset
-sequence = JPEGPleno8iVFBSequence(
-    root_dir="/mnt/shared-dataset/jpeg-pleno",
-    sequence_name="longdress"
-)
+# Multiple configs
+python3 scripts/test_gpcc_configs.py
 
-# Create PyTorch dataset
-dataset = PointCloudDataset(
-    sequence=sequence,
-    frame_indices=list(range(100)),
-    normalize=True,
-    num_points=100000
-)
+# Results in: results/gpcc_demo/
 ```
 
-### Metrics Calculation
+### Train Baseline Model
 
-```python
-from pcml.metrics import CompressionMetrics
-from pcml.metrics.compression import CompressionCalculator
-from pcml.metrics.quality import GeometryQualityCalculator, ColorQualityCalculator
+```bash
+source .venv/bin/activate
 
-# Compression metrics
-metrics = CompressionCalculator.calculate_from_sizes(
-    original_size_bytes=1000000,
-    compressed_size_bytes=100000,
-    num_points=100000
-)
-print(f"Compression ratio: {metrics.compression_ratio:.4f}")
-print(f"Bits per point: {metrics.bits_per_point:.2f}")
+# Quick test (5 frames, 10 epochs, ~5 min)
+python3 scripts/quick_train_simple.py --num-frames 5 --epochs 10
 
-# Geometry quality metrics
-geo_metrics = GeometryQualityCalculator.calculate_all(
-    original_points,
-    reconstructed_points
-)
-print(f"PSNR: {geo_metrics.psnr:.2f} dB")
-print(f"Hausdorff: {geo_metrics.hausdorff:.6f}")
+# Full training (20 frames, 50 epochs, ~30 min)
+python3 scripts/quick_train_simple.py
 
-# Color quality metrics
-color_metrics = ColorQualityCalculator.calculate_all(
-    original_colors,
-    reconstructed_colors
-)
-print(f"Color PSNR: {color_metrics.psnr:.2f} dB")
+# Checkpoints in: models/baselines/simple_quick/
 ```
+
+### Setup Additional Frameworks
+
+For frameworks requiring separate environments (TensorFlow 1.x):
+
+```bash
+# pcc_geo_cnn_v2 (has pretrained models)
+./scripts/setup_pcc_geo_cnn_v2.sh
+
+# Then download models from Google Drive
+# See: .docs/SETUP.md
+```
+
+---
+
+## Datasets
+
+### Recommended: 8iVFB Dataset
+
+```bash
+# Download from: http://plenodb.jpeg.org/
+# Extract to: datasets/8iVFB/
+
+# Small subset for testing (already included):
+datasets/8iVFB_small/
+├── longdress_vox10_1300.ply
+├── longdress_vox10_1301.ply
+└── ...
+```
+
+---
 
 ## Development
 
-### Running Tests
+### Run Tests
 
 ```bash
-# Run all tests
-make test
-
-# Run tests with verbose output
-make test-verbose
-
-# Run tests with coverage
-make test-coverage
-
-# Run specific test file
-pytest tests/test_data.py -v
+make test              # Run all tests
+make test-verbose      # Verbose output
+make coverage          # Generate coverage report
 ```
 
 ### Code Quality
 
 ```bash
-# Format code (black + isort)
-make format
-
-# Run linters (flake8 + pylint)
-make lint
-
-# Run type checker (mypy)
-make type-check
-
-# Run all checks
-make check
+make lint              # Run flake8
+make format            # Run black formatter
 ```
 
-### Available Make Commands
+### Useful Commands
 
 ```bash
-make help           # Show all available commands
-make venv           # Create virtual environment
-make install        # Install package in editable mode
-make install-dev    # Install with dev dependencies
-make setup          # Full setup from scratch
-make test           # Run tests
-make test-coverage  # Run tests with coverage
-make format         # Format code
-make lint           # Run linters
-make type-check     # Run type checker
-make clean          # Remove build artifacts
-make docs           # Build documentation
+make help              # Show all commands
+make clean             # Remove cache/artifacts
+make train-baseline    # Train baseline model
 ```
 
-## Datasets
+---
 
-### Local Datasets
+## Environment Strategy
 
-Small test datasets are stored in `datasets/`:
-- `8iVFB_small/`: Subset of 8iVFB dataset for quick testing
+**Main Environment (.venv)**: PyTorch 2.0, Python 3.10
+- Use for: baseline models, G-PCC, benchmarking
+- **Default for all work**
 
-### Shared Datasets
+**Conda Environments**: Only for legacy frameworks
+- `pcc_geo_cnn` - TensorFlow 1.15, Python 3.6
+- `learned_pcc` - PyTorch 1.13, Python 3.10
+- `pccai` - PyTorch 1.8, Python 3.8
 
-Large datasets are stored on shared storage:
-- JPEG Pleno dataset: `/mnt/shared-dataset/jpeg-pleno/`
-  - Sequences: longdress, loot, redandblack, soldier
+**Activate main env:**
+```bash
+source .venv/bin/activate
+```
 
-## Testing
+**Activate conda env (when needed):**
+```bash
+conda activate pcc_geo_cnn
+```
 
-The test suite includes:
-- Unit tests for data loaders
-- Unit tests for metrics calculation
-- Integration tests for full workflows
-- Fixtures for common test data (see `tests/conftest.py`)
+---
 
-Tests automatically skip if required datasets are not available.
+## Results
 
-## Project Status
+Current performance (on longdress_vox10_1300.ply):
 
-This project is under active development as part of a diploma thesis.
+| Method | BPP | PSNR (dB) | MSE | Notes |
+|--------|-----|-----------|-----|-------|
+| G-PCC (lossless) | 14.0 | ∞ | 0.0 | Perfect reconstruction |
+| Simple Baseline | TBD | 28.1 | 0.019 | Trained on 20 frames |
 
-### Completed
-- Data loading infrastructure (PLY, JPEG Pleno)
-- Compression metrics calculation
-- Geometry and color quality metrics
-- PyTorch dataset wrappers
-- Testing framework
+---
 
-### In Progress
-- ML compression model implementations
-- Benchmarking pipeline
-- Visualization tools
+## Documentation
 
-### Planned
-- Model training scripts
-- Automated benchmarking
-- Results analysis and visualization
-- Documentation website
+See `.docs/` for detailed documentation:
 
-## Contributing
+- **SETUP.md** - Detailed setup instructions
+- **FRAMEWORKS.md** - Framework comparison & setup
+- **CORE_PHILOSOPHY.md** - Development principles
+- **PROJECT_TIMELINE.md** - Current progress & roadmap
 
-As this is a thesis project, external contributions are not currently accepted. However, feedback and suggestions are welcome!
-
-## License
-
-MIT License - See LICENSE file for details
+---
 
 ## Citation
 
-If you use this framework in your research, please cite:
-
 ```bibtex
-@mastersthesis{pcml2025,
-  title={Point Cloud Compression using Machine Learning: A Benchmarking Framework},
-  author={Student Name},
-  year={2025},
-  school={University Name}
+@mastersthesis{your_thesis_2026,
+  title={Point Cloud Compression using Machine Learning},
+  author={Your Name},
+  year={2026},
+  school={Your University}
 }
 ```
 
-## Contact
+---
 
-For questions or feedback, please contact: student@example.com
+## License
 
-## Acknowledgments
+[Your license here]
 
-- JPEG Pleno dataset providers
-- 8iVFB dataset creators
-- Open3D library maintainers
-- PyTorch team
+---
+
+## Conda Auto-Activation (Disabled)
+
+We disabled conda base auto-activation to keep the main venv as default.
+
+**To re-enable** (not recommended):
+```bash
+conda config --set auto_activate_base true
+```
+
+**Manual activation when needed:**
+```bash
+conda activate pcc_geo_cnn  # Or other env
+```
