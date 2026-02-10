@@ -92,3 +92,6 @@ frameworks/**/*.pb
 # OS
 .DS_Store
 Thumbs.db
+
+# extra
+to_read_for_claude*
