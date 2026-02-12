@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -159,30 +160,30 @@ def main():
     # G-PCC
     if not args.skip_gpcc:
         print("Testing G-PCC configurations:")
-        for config in args.gpcc_configs:
+        for config in tqdm(args.gpcc_configs, desc="G-PCC", unit="config"):
             try:
                 result = benchmark_gpcc(geometry, colors, config)
                 results.append(result)
-                print(
+                tqdm.write(
                     f"    ✓ {config}: {result['bpp']:.2f} BPP, {result['psnr']:.2f} dB"
                 )
             except Exception as e:
-                print(f"    ✗ {config}: {e}")
+                tqdm.write(f"    ✗ {config}: {e}")
         print()
 
     # pcc_geo_cnn_v2
     if not args.skip_cnn:
         print("Testing pcc_geo_cnn_v2 models:")
-        for model in args.cnn_models:
+        for model in tqdm(args.cnn_models, desc="pcc_geo_cnn_v2", unit="model"):
             try:
                 result = benchmark_pcc_geo_cnn(geometry, colors, model)
                 results.append(result)
-                print(
+                tqdm.write(
                     f"    ✓ {model}: {result['bpp']:.2f} BPP, "
                     f"{result['psnr']:.2f} dB ({result['compression_time']:.1f}s)"
                 )
             except Exception as e:
-                print(f"    ✗ {model}: {e}")
+                tqdm.write(f"    ✗ {model}: {e}")
         print()
 
     # Save results
