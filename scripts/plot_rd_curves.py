@@ -31,13 +31,17 @@ def plot_rd_curve(results_path, output_path=None, show=False):
     # Create figure
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # Plot each method
-    methods = df["method"].unique()
+    # Separate lossless and lossy methods
+    lossless_df = df[df["psnr"] == float("inf")]
+    lossy_df = df[df["psnr"] != float("inf")]
+
+    # Plot each lossy method
+    methods = lossy_df["method"].unique()
     markers = {"G-PCC": "s", "pcc_geo_cnn_v2": "o", "Simple Baseline": "^"}
-    colors = {"G-PCC": "blue", "pcc_geo_cnn_v2": "red", "Simple Baseline": "green"}
+    colors = {"G-PCC": "#2E86AB", "pcc_geo_cnn_v2": "red", "Simple Baseline": "green"}
 
     for method in methods:
-        method_df = df[df["method"] == method].sort_values("bpp")
+        method_df = lossy_df[lossy_df["method"] == method].sort_values("bpp")
 
         marker = markers.get(method, "o")
         color = colors.get(method, "black")
@@ -56,15 +60,46 @@ def plot_rd_curve(results_path, output_path=None, show=False):
 
         # Add config labels
         for _, row in method_df.iterrows():
-            if row["psnr"] != float("inf"):  # Skip lossless points for labeling
-                ax.annotate(
-                    row["config"],
-                    (row["bpp"], row["psnr"]),
-                    textcoords="offset points",
-                    xytext=(5, 5),
-                    fontsize=8,
-                    alpha=0.7,
-                )
+            ax.annotate(
+                row["config"],
+                (row["bpp"], row["psnr"]),
+                textcoords="offset points",
+                xytext=(5, 5),
+                fontsize=8,
+                alpha=0.7,
+            )
+
+    # Plot lossless methods at top with special handling
+    if len(lossless_df) > 0 and len(lossy_df) > 0:
+        # Place lossless points above the highest lossy PSNR
+        ylim_max = lossy_df["psnr"].max() + 3
+
+        for _, row in lossless_df.iterrows():
+            method = row["method"]
+            marker = markers.get(method, "s")
+            color = colors.get(method, "#2E86AB")
+
+            # Plot point at top
+            ax.plot(
+                row["bpp"],
+                ylim_max - 1,
+                marker=marker,
+                markersize=12,
+                color=color,
+                label=f"{method} (lossless)",
+                zorder=10,
+            )
+
+            # Add annotation
+            ax.annotate(
+                f"Lossless\n{row['bpp']:.2f} BPP",
+                xy=(row["bpp"], ylim_max - 1),
+                xytext=(row["bpp"] + 2, ylim_max - 2),
+                fontsize=9,
+                ha="left",
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8),
+                arrowprops=dict(arrowstyle="->", lw=1.5),
+            )
 
     ax.set_xlabel("Bits Per Point (BPP)", fontsize=12)
     ax.set_ylabel("PSNR (dB)", fontsize=12)
