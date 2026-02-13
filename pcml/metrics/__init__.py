@@ -1,6 +1,7 @@
 """Evaluation metrics for point cloud compression."""
 
 from .compression import CompressionMetrics
+from .curvature import CurvatureMetrics, StratifiedQualityMetrics
 from .quality import ColorMetrics, GeometryMetrics, QualityMetrics
 
 __all__ = [
@@ -8,4 +9,6 @@ __all__ = [
     "QualityMetrics",
     "GeometryMetrics",
     "ColorMetrics",
+    "CurvatureMetrics",
+    "StratifiedQualityMetrics",
 ]

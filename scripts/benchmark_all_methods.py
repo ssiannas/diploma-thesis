@@ -1,6 +1,8 @@
 """Benchmark comparison of all compression methods.
 
-Compares G-PCC, Simple Baseline, and pcc_geo_cnn_v2 on the same point clouds.
+Compares G-PCC, Simple Baseline, pcc_geo_cnn_v2, and PCGCv2 on the same
+point clouds. Includes curvature-stratified quality metrics for
+oversmoothing detection.
 """
 
 import argparse
@@ -18,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from pcml.data.loaders import PLYPointCloudLoader
 from pcml.frameworks.gpcc import GPCCAdapter
 from pcml.frameworks.pcc_geo_cnn_v2 import PCCGeoCNNv2Adapter
+from pcml.frameworks.pcgcv2 import PCGCv2Adapter
+from pcml.metrics.curvature import CurvatureQualityCalculator
 from pcml.metrics.quality import GeometryQualityCalculator
 
 
@@ -82,6 +86,59 @@ def benchmark_pcc_geo_cnn(geometry, colors, model_name="c1"):
     }
 
 
+def benchmark_pcgcv2(
+    geometry, colors, rate_point="r3", resolution=1024, compute_curvature=True
+):
+    """Benchmark PCGCv2 compression with optional curvature-stratified metrics."""
+    print(f"  Testing PCGCv2 ({rate_point})...")
+    adapter = PCGCv2Adapter(rate_point=rate_point, resolution=resolution)
+
+    start = time.time()
+    compressed, result = adapter.compress(geometry, colors)
+    recon_geom, _ = adapter.decompress(compressed)
+    comp_time = time.time() - start
+
+    # Standard MPEG metrics with peak = resolution - 1
+    peak = resolution - 1
+    metrics = GeometryQualityCalculator.calculate_all(geometry, recon_geom, peak=peak)
+    bpp = (result.compressed_size_bytes * 8) / len(geometry)
+
+    row = {
+        "method": "PCGCv2",
+        "config": rate_point,
+        "input_points": len(geometry),
+        "output_points": len(recon_geom),
+        "compressed_bytes": result.compressed_size_bytes,
+        "bpp": bpp,
+        "psnr": metrics.psnr,
+        "mse": metrics.mse,
+        "rmse": metrics.rmse,
+        "d1": metrics.d1,
+        "d2_sym": metrics.d2_sym,
+        "compression_time": comp_time,
+    }
+
+    # Curvature-stratified metrics for oversmoothing detection
+    if compute_curvature:
+        try:
+            strat = CurvatureQualityCalculator.calculate_all(
+                geometry, recon_geom, peak=peak
+            )
+            row.update(
+                {
+                    "flat_psnr": strat.flat_psnr,
+                    "medium_psnr": strat.medium_psnr,
+                    "edge_psnr": strat.edge_psnr,
+                    "degradation": strat.degradation,
+                    "curvature_kl": strat.curvature_kl,
+                }
+            )
+        except Exception as e:
+            print(f"    Warning: curvature metrics failed: {e}")
+
+    return row
+
+
 def main():
     parser = argparse.ArgumentParser(description="Benchmark all compression methods")
     parser.add_argument(
@@ -115,6 +172,18 @@ def main():
         help="pcc_geo_cnn_v2 models to test",
     )
     parser.add_argument(
+        "--pcgcv2-rates",
+        nargs="+",
+        default=[],
+        help="PCGCv2 rate points to test (r1-r7)",
+    )
+    parser.add_argument(
+        "--pcgcv2-resolution",
+        type=int,
+        default=1024,
+        help="Resolution for PCGCv2 (default: 1024 for 10-bit)",
+    )
+    parser.add_argument(
         "--skip-gpcc",
         action="store_true",
         help="Skip G-PCC tests",
@@ -123,6 +192,16 @@ def main():
         "--skip-cnn",
         action="store_true",
         help="Skip pcc_geo_cnn_v2 tests",
+    )
+    parser.add_argument(
+        "--skip-pcgcv2",
+        action="store_true",
+        help="Skip PCGCv2 tests",
+    )
+    parser.add_argument(
+        "--no-curvature",
+        action="store_true",
+        help="Skip curvature-stratified metrics (faster)",
     )
     args = parser.parse_args()
 
@@ -184,6 +263,30 @@ def main():
                 )
             except Exception as e:
                 tqdm.write(f"    ✗ {model}: {e}")
+        print()
+
+    # PCGCv2
+    if not args.skip_pcgcv2 and args.pcgcv2_rates:
+        print("Testing PCGCv2 rate points:")
+        for rate in tqdm(args.pcgcv2_rates, desc="PCGCv2", unit="rate"):
+            try:
+                result = benchmark_pcgcv2(
+                    geometry,
+                    colors,
+                    rate_point=rate,
+                    resolution=args.pcgcv2_resolution,
+                    compute_curvature=not args.no_curvature,
+                )
+                results.append(result)
+                msg = (
+                    f"    ✓ {rate}: {result['bpp']:.3f} BPP, "
+                    f"{result['psnr']:.2f} dB ({result['compression_time']:.1f}s)"
+                )
+                if "degradation" in result:
+                    msg += f" [degradation: {result['degradation']:.2f} dB]"
+                tqdm.write(msg)
+            except Exception as e:
+                tqdm.write(f"    ✗ {rate}: {e}")
         print()
 
     # Save results

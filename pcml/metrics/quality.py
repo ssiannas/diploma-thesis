@@ -113,22 +113,29 @@ class GeometryQualityCalculator:
         original: np.ndarray,
         reconstructed: np.ndarray,
         max_value: Optional[float] = None,
+        peak: Optional[float] = None,
     ) -> float:
         """
         Calculate peak signal-to-noise ratio.
 
         For geometry, max_value is typically the bounding box diagonal.
+        For voxelized point clouds (e.g., PCGCv2, MPEG CTC), use
+        ``peak=resolution-1`` (e.g., 1023 for 10-bit).
 
         Args:
             original: Original point cloud (N, 3).
             reconstructed: Reconstructed point cloud (M, 3).
             max_value: Maximum value for PSNR calculation (bounding box diagonal).
-                If None, computed from original point cloud.
+                If None, computed from original point cloud. Ignored if peak is set.
+            peak: Explicit peak value for PSNR (overrides max_value).
+                Use ``peak=1023`` for 10-bit voxelized point clouds.
 
         Returns:
             PSNR in dB.
         """
-        if max_value is None:
+        if peak is not None:
+            max_value = peak
+        elif max_value is None:
             # Use bounding box diagonal as max value
             min_coords = original.min(axis=0)
             max_coords = original.max(axis=0)
@@ -205,7 +212,9 @@ class GeometryQualityCalculator:
 
     @staticmethod
     def calculate_all(
-        original: np.ndarray, reconstructed: np.ndarray
+        original: np.ndarray,
+        reconstructed: np.ndarray,
+        peak: Optional[float] = None,
     ) -> GeometryMetrics:
         """
         Calculate all geometry quality metrics.
@@ -213,13 +222,18 @@ class GeometryQualityCalculator:
         Args:
             original: Original point cloud (N, 3).
             reconstructed: Reconstructed point cloud (M, 3).
+            peak: Explicit peak value for PSNR. If None, uses bounding box
+                diagonal (default behavior). Use ``peak=1023`` for 10-bit
+                voxelized point clouds.
 
         Returns:
             GeometryMetrics object with all metrics computed.
         """
         mse = GeometryQualityCalculator.calculate_mse(original, reconstructed)
         rmse = np.sqrt(mse)
-        psnr = GeometryQualityCalculator.calculate_psnr(original, reconstructed)
+        psnr = GeometryQualityCalculator.calculate_psnr(
+            original, reconstructed, peak=peak
+        )
         d1 = GeometryQualityCalculator.calculate_d1(original, reconstructed)
         d2_sym = GeometryQualityCalculator.calculate_d2_symmetric(
             original, reconstructed

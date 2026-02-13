@@ -16,3 +16,6 @@
 [submodule "frameworks/learned-point-cloud-compression-for-classification"]
 	path = frameworks/learned-point-cloud-compression-for-classification
 	url = https://github.com/multimedialabsfu/learned-point-cloud-compression-for-classification.git
+[submodule "frameworks/PCGCv2"]
+	path = frameworks/PCGCv2
+	url = https://github.com/NJUVISION/PCGCv2.git

@@ -33,10 +33,12 @@ make test
 | **G-PCC (TMC13)** | Traditional | ✅ Working | 14 BPP lossless, inf PSNR |
 | **Simple Baseline** | MLP Autoencoder | ✅ Trained | 28.1 dB PSNR, 0.019 loss |
 | **pcc_geo_cnn_v2** | Learned CNN | ✅ Working | 36 BPP, 53 dB PSNR (c1 model) |
+| **PCGCv2** | Sparse Conv (MinkowskiEngine) | ✅ Integrated | 0.025-0.4 BPP, 58-60 dB D1-PSNR |
 
 ### Infrastructure
 - ✅ Data loaders (PLY format)
 - ✅ Metrics (PSNR, MSE, D1, D2, Hausdorff)
+- ✅ Curvature-stratified metrics (oversmoothing detection)
 - ✅ Visualization tools
 - ✅ Testing framework
 - ✅ Framework adapter pattern
@@ -54,14 +56,16 @@ diploma-thesis/
 │   ├── frameworks/            # External codec adapters
 │   │   ├── base.py            # Base adapter interface
 │   │   ├── gpcc.py            # G-PCC (working)
-│   │   └── pcc_geo_cnn_v2.py  # Learned CNN (ready)
+│   │   ├── pcc_geo_cnn_v2.py  # Learned CNN (ready)
+│   │   └── pcgcv2.py          # PCGCv2 sparse conv (SOTA)
 │   ├── training/              # Training utilities
 │   └── visualization/         # Plotting tools
 │
 ├── frameworks/                # External codecs (submodules)
 │   ├── mpeg-pcc-tmc13/        # G-PCC (C++)
-│   └── pcc_geo_cnn_v2/        # Learned compression (TF 1.15)
-│       └── models/            # → Symlink to Shared Drive
+│   ├── pcc_geo_cnn_v2/        # Learned compression (TF 1.15)
+│   │   └── models/            # → Symlink to Shared Drive
+│   └── PCGCv2/                # Sparse conv compression (PyTorch)
 │
 ├── scripts/                   # Executable scripts
 │   ├── demo_gpcc.py           # Test G-PCC
@@ -162,6 +166,11 @@ make clean             # Remove cache/artifacts
 - Called via subprocess by main env
 - Use: `conda activate pcc_geo_cnn`
 
+**Conda (pcgcv2)**: Python 3.8, PyTorch 1.10, MinkowskiEngine 0.5.4
+- Only for PCGCv2 framework
+- Called via subprocess by main env, GPU-accelerated
+- Use: `conda activate pcgcv2`
+
 ---
 
 ## Metrics
@@ -175,6 +184,11 @@ make clean             # Remove cache/artifacts
 - **D2**: Bidirectional max distance (Hausdorff)
 - **BPP**: Bits per point (compression rate)
 
+### Oversmoothing Detection (Novel)
+- **Curvature-stratified PSNR**: Separate PSNR for flat/medium/edge regions
+- **Degradation**: flat_psnr - edge_psnr (key oversmoothing indicator)
+- **Curvature KL divergence**: Distribution shift in surface curvature
+
 See `METRICS_RATIONALE.md` for detailed explanation of why we use different metrics for training vs evaluation.
 
 ---
@@ -182,8 +196,9 @@ See `METRICS_RATIONALE.md` for detailed explanation of why we use different metr
 ## Documentation
 
 - `README.md` (this file) - Start here
-- `METRICS_RATIONALE.md` - Why our metric choices
+- `METRICS_RATIONALE.md` - Why our metric choices (incl. curvature metrics)
 - `.docs/` - Additional documentation
+  - `PCGCV2_INTEGRATION.md` - PCGCv2 setup, rationale, bibliography
   - `CORE_PHILOSOPHY.md` - Development principles
   - `CODE_STYLE.md` - Style guidelines
   - `PROJECT_TIMELINE.md` - Progress tracker
@@ -242,18 +257,19 @@ python3 scripts/plot_rd_curves.py \
 2. ✅ ~~Test pcc_geo_cnn_v2 models (c1, c2, c3p)~~
 3. ✅ ~~Create benchmark comparison script~~
 4. ✅ ~~Generate RD curve visualization~~
-5. **Run complete benchmark** (c1, c2, c3, c3p + G-PCC on 10K points)
+5. ✅ ~~Integrate PCGCv2 (sparse conv SOTA codec)~~
+6. ✅ ~~Implement curvature-stratified metrics~~
+7. **Download PCGCv2 checkpoints** and run first benchmark
+8. **Run PCGCv2 benchmark** (r1-r7 on 10K points with curvature metrics)
 
 ### Short-term
-6. Test c3 model (only untested model)
-7. Add Simple Baseline to benchmark script
-8. Multi-frame evaluation (all 8iVFB sequences)
-9. Full-scale testing (100K+ points)
+9. Analyze oversmoothing: compare degradation across rate points
+10. Multi-frame evaluation (all 8iVFB sequences with PCGCv2)
+11. Full-scale testing (100K+ points)
 
 ### Long-term
-10. Train new models on full 8iVFB dataset
-11. Implement advanced architectures
-12. Final thesis evaluation and comparison
+12. Train lightweight post-processing refinement module for edge regions
+13. Final thesis evaluation and comparison
 
 ---
 
