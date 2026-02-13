@@ -1,4 +1,19 @@
-"""G-PCC (MPEG TMC13) adapter."""
+"""G-PCC (MPEG TMC13) adapter.
+
+Supports both lossless and lossy geometry compression. For lossy mode,
+``coding_scale`` controls the quantization step: values < 1.0 quantize
+the geometry (lower = more aggressive quantization = lower bitrate).
+
+Usage:
+    # Lossless (default)
+    adapter = GPCCAdapter()
+    compressed, result = adapter.compress(geometry)
+
+    # Lossy at various rates
+    for qs in [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]:
+        adapter = GPCCAdapter(coding_scale=qs)
+        result, decoded = adapter.compress_and_decompress(geometry)
+"""
 
 import subprocess
 import tempfile
@@ -13,16 +28,26 @@ from pcml.frameworks.base import BaseAdapter, CompressionResult
 
 
 class GPCCAdapter(BaseAdapter):
-    """Adapter for MPEG G-PCC (tmc3) codec."""
+    """Adapter for MPEG G-PCC (tmc3) codec.
+
+    Args:
+        tmc3_path: Path to the tmc3 binary.
+        config_path: Optional path to a G-PCC config file.
+        coding_scale: Geometry coding scale (1.0 = lossless, <1.0 = lossy).
+            Lower values quantize more aggressively, reducing bitrate.
+    """
 
     def __init__(
         self,
         tmc3_path: str = "frameworks/mpeg-pcc-tmc13/build/tmc3/tmc3",
         config_path: Optional[str] = None,
+        coding_scale: float = 1.0,
     ):
-        super().__init__("G-PCC")
+        name = "G-PCC" if coding_scale == 1.0 else f"G-PCC_qs{coding_scale}"
+        super().__init__(name)
         self.tmc3_path = Path(tmc3_path)
         self.config_path = Path(config_path) if config_path else None
+        self.coding_scale = coding_scale
 
         if not self.tmc3_path.exists():
             raise FileNotFoundError(f"G-PCC binary not found: {self.tmc3_path}")
@@ -34,6 +59,7 @@ class GPCCAdapter(BaseAdapter):
             tmpdir = Path(tmpdir)
             input_ply = tmpdir / "input.ply"
             output_bin = tmpdir / "compressed.bin"
+            recon_ply = tmpdir / "recon.ply"
 
             self._save_ply(input_ply, geometry, colors)
 
@@ -42,10 +68,14 @@ class GPCCAdapter(BaseAdapter):
                 "--mode=0",
                 f"--uncompressedDataPath={input_ply}",
                 f"--compressedStreamPath={output_bin}",
+                f"--reconstructedDataPath={recon_ply}",
             ]
 
             if self.config_path:
                 cmd.append(f"--config={self.config_path}")
+
+            if self.coding_scale != 1.0:
+                cmd.append(f"--codingScale={self.coding_scale}")
 
             start_time = time.time()
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -57,15 +87,40 @@ class GPCCAdapter(BaseAdapter):
             compressed_data = output_bin.read_bytes()
             compressed_size = len(compressed_data)
 
+            # Read the reconstructed cloud produced during encoding
+            decoded_geometry = None
+            if recon_ply.exists():
+                loader = PLYPointCloudLoader(verbose=False)
+                pc = loader.load(str(recon_ply))
+                decoded_geometry = pc.geometry
+
+            self._last_decoded_geometry = decoded_geometry
+
             return compressed_data, CompressionResult(
                 compressed_size_bytes=compressed_size,
                 compression_time_seconds=compression_time,
                 decompression_time_seconds=0.0,
+                metadata={
+                    "coding_scale": self.coding_scale,
+                    "num_points_input": len(geometry),
+                    "num_points_output": (
+                        len(decoded_geometry) if decoded_geometry is not None else 0
+                    ),
+                },
             )
 
     def decompress(
         self, compressed_data: bytes
     ) -> tuple[np.ndarray, Optional[np.ndarray]]:
+        # Fast path: return cached decode from compress()
+        if (
+            hasattr(self, "_last_decoded_geometry")
+            and self._last_decoded_geometry is not None
+        ):
+            geom = self._last_decoded_geometry
+            self._last_decoded_geometry = None
+            return geom, None
+
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
             input_bin = tmpdir / "compressed.bin"
@@ -91,6 +146,22 @@ class GPCCAdapter(BaseAdapter):
             pc = loader.load(str(output_ply))
 
             return pc.geometry, pc.colors
+
+    def compress_and_decompress(
+        self, geometry: np.ndarray, colors: Optional[np.ndarray] = None
+    ) -> tuple[CompressionResult, np.ndarray]:
+        """Compress and decompress in one call.
+
+        Args:
+            geometry: (N, 3) point coordinates.
+            colors: Optional (N, 3) RGB colors [0-255].
+
+        Returns:
+            (compression_result, decoded_geometry)
+        """
+        compressed_data, result = self.compress(geometry, colors)
+        decoded_geometry, _ = self.decompress(compressed_data)
+        return result, decoded_geometry
 
     def _save_ply(
         self, path: Path, geometry: np.ndarray, colors: Optional[np.ndarray] = None
