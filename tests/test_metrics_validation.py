@@ -14,6 +14,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from pcml.metrics.compression import CompressionCalculator
+from pcml.metrics.curvature import CurvatureQualityCalculator
 from pcml.metrics.quality import ColorQualityCalculator, GeometryQualityCalculator
 from pcml.models.losses import ChamferDistance
 
@@ -154,10 +155,10 @@ class TestMetricsValidation:
         metrics = GeometryQualityCalculator.calculate_all(original, noisy)
 
         assert (
-            metrics.d2_symmetric >= metrics.d1
-        ), f"D2 ({metrics.d2_symmetric}) should be >= D1 ({metrics.d1})"
+            metrics.d2_sym >= metrics.d1
+        ), f"D2 ({metrics.d2_sym}) should be >= D1 ({metrics.d1})"
 
-        print(f"[OK] D1={metrics.d1:.6f}, D2={metrics.d2_symmetric:.6f}")
+        print(f"[OK] D1={metrics.d1:.6f}, D2={metrics.d2_sym:.6f}")
 
     def test_hausdorff_equals_d2(self, slightly_noisy_clouds):
         """Hausdorff distance should equal D2_symmetric."""
@@ -165,12 +166,269 @@ class TestMetricsValidation:
 
         metrics = GeometryQualityCalculator.calculate_all(original, noisy)
 
-        assert np.abs(metrics.hausdorff - metrics.d2_symmetric) < 1e-6, (
-            f"Hausdorff ({metrics.hausdorff}) should equal "
-            f"D2 ({metrics.d2_symmetric})"
+        assert np.abs(metrics.hausdorff - metrics.d2_sym) < 1e-6, (
+            f"Hausdorff ({metrics.hausdorff}) should equal " f"D2 ({metrics.d2_sym})"
         )
 
         print(f"[OK] Hausdorff == D2: {metrics.hausdorff:.6f}")
+
+
+class TestCurvatureMetrics:
+    """Test suite for curvature-stratified oversmoothing metrics."""
+
+    @pytest.fixture
+    def plane_and_noisy(self):
+        """Flat plane (low curvature) with noisy version.
+
+        Returns original, reconstructed, and curvature arrays.
+        """
+        np.random.seed(42)
+        n = 2000
+        # Create a flat grid
+        x = np.random.uniform(0, 100, n)
+        y = np.random.uniform(0, 100, n)
+        z = np.zeros(n)
+        original = np.column_stack([x, y, z]).astype(np.float64)
+
+        # Add noise: more noise at high-x (simulating edge region)
+        noise = np.random.randn(n, 3) * 0.1
+        # Make noise proportional to x coordinate
+        noise *= (x / 100.0)[:, None]
+        reconstructed = (original + noise).astype(np.float64)
+
+        curvature = CurvatureQualityCalculator.compute_curvature(original, k=15)
+        return original, reconstructed, curvature
+
+    @pytest.fixture
+    def sphere_cloud(self):
+        """Point cloud on a sphere surface (uniform curvature).
+
+        Creates original + noisy version where edge-like points get more noise.
+        """
+        np.random.seed(42)
+        n = 1500
+        # Points on a unit sphere
+        phi = np.random.uniform(0, 2 * np.pi, n)
+        theta = np.random.uniform(0, np.pi, n)
+        r = 50.0
+        x = r * np.sin(theta) * np.cos(phi)
+        y = r * np.sin(theta) * np.sin(phi)
+        z = r * np.cos(theta)
+        original = np.column_stack([x, y, z]).astype(np.float64)
+
+        curvature = CurvatureQualityCalculator.compute_curvature(original, k=15)
+
+        # Add curvature-dependent noise (simulate oversmoothing)
+        noise_scale = 0.5 + 2.0 * (curvature / (curvature.max() + 1e-10))
+        noise = np.random.randn(n, 3) * noise_scale[:, None]
+        reconstructed = (original + noise).astype(np.float64)
+
+        return original, reconstructed, curvature
+
+    def test_kl_divergence_identical_distributions(self):
+        """KL divergence of identical distributions should be ~0."""
+        np.random.seed(42)
+        curvature = np.random.exponential(0.1, 1000)
+        kl = CurvatureQualityCalculator.compute_curvature_kl(curvature, curvature)
+        assert kl < 0.01, f"KL of identical distributions should be ~0, got {kl}"
+
+    def test_kl_divergence_different_distributions(self):
+        """KL divergence of very different distributions should be large."""
+        np.random.seed(42)
+        orig = np.random.exponential(0.05, 1000)
+        dec = np.random.exponential(0.5, 1000)
+        kl = CurvatureQualityCalculator.compute_curvature_kl(orig, dec)
+        assert kl > 0.1, f"KL of different distributions should be large, got {kl}"
+
+    def test_kl_uses_independent_curvature(self, sphere_cloud):
+        """KL in compute_stratified_psnr should use independently-computed curvature."""
+        original, reconstructed, curvature = sphere_cloud
+
+        # The KL value should be the same regardless of direction
+        # (it always compares original vs independently-computed rec curvature)
+        fwd = CurvatureQualityCalculator.compute_stratified_psnr(
+            original,
+            reconstructed,
+            curvature,
+            direction="forward",
+            k=15,
+        )
+        rev = CurvatureQualityCalculator.compute_stratified_psnr(
+            original,
+            reconstructed,
+            curvature,
+            direction="reverse",
+            k=15,
+        )
+        fwd_self = CurvatureQualityCalculator.compute_stratified_psnr(
+            original,
+            reconstructed,
+            curvature,
+            direction="forward_self",
+            k=15,
+        )
+
+        # All three should compute KL from independently-computed rec curvature
+        assert abs(fwd.curvature_kl - rev.curvature_kl) < 1e-6, (
+            f"KL should be same across directions: "
+            f"fwd={fwd.curvature_kl}, rev={rev.curvature_kl}"
+        )
+        assert abs(fwd.curvature_kl - fwd_self.curvature_kl) < 1e-6, (
+            f"KL should be same across directions: "
+            f"fwd={fwd.curvature_kl}, fwd_self={fwd_self.curvature_kl}"
+        )
+
+    def test_forward_self_direction(self, sphere_cloud):
+        """forward_self direction should produce valid stratified metrics."""
+        original, reconstructed, curvature = sphere_cloud
+
+        result = CurvatureQualityCalculator.compute_stratified_psnr(
+            original,
+            reconstructed,
+            curvature,
+            direction="forward_self",
+            k=15,
+        )
+
+        assert result.direction == "forward_self"
+        assert np.isfinite(result.flat_psnr)
+        assert np.isfinite(result.edge_psnr)
+        assert np.isfinite(result.degradation)
+        # With curvature-dependent noise, we expect positive degradation
+        assert result.degradation > 0, (
+            f"Expected positive degradation for curvature-dependent noise, "
+            f"got {result.degradation}"
+        )
+
+    def test_forward_self_no_nan_psnr(self, plane_and_noisy):
+        """forward_self should not produce NaN PSNR values."""
+        original, reconstructed, curvature = plane_and_noisy
+
+        result = CurvatureQualityCalculator.compute_stratified_psnr(
+            original,
+            reconstructed,
+            curvature,
+            direction="forward_self",
+            k=15,
+        )
+        assert np.isfinite(result.flat_psnr)
+        assert np.isfinite(result.medium_psnr)
+        assert np.isfinite(result.edge_psnr)
+
+    def test_nn_multiplicity_basic(self, sphere_cloud):
+        """NN multiplicity should produce valid results."""
+        original, reconstructed, curvature = sphere_cloud
+
+        result = CurvatureQualityCalculator.compute_nn_multiplicity(
+            original,
+            reconstructed,
+            curvature,
+            n_strata=3,
+        )
+
+        # All strata should be present
+        assert "flat" in result.per_stratum_mean
+        assert "medium" in result.per_stratum_mean
+        assert "edge" in result.per_stratum_mean
+
+        # Mean multiplicity should be > 0
+        assert result.overall_mean > 0
+        assert result.overall_max >= 1
+
+        # Per-stratum means should be positive
+        for name in ["flat", "medium", "edge"]:
+            assert (
+                result.per_stratum_mean[name] > 0
+            ), f"Stratum {name} has zero multiplicity"
+
+    def test_nn_multiplicity_identical_clouds(self):
+        """For identical clouds, multiplicity should be 1 everywhere."""
+        np.random.seed(42)
+        points = np.random.randn(500, 3)
+        curvature = CurvatureQualityCalculator.compute_curvature(points, k=10)
+
+        result = CurvatureQualityCalculator.compute_nn_multiplicity(
+            points,
+            points.copy(),
+            curvature,
+        )
+
+        assert (
+            result.overall_mean == 1.0
+        ), f"Identical clouds should have multiplicity 1, got {result.overall_mean}"
+
+    def test_psnr_vs_curvature_curve_basic(self, sphere_cloud):
+        """Continuous PSNR-vs-curvature curve should produce valid results."""
+        original, reconstructed, curvature = sphere_cloud
+
+        result = CurvatureQualityCalculator.compute_psnr_vs_curvature_curve(
+            original,
+            reconstructed,
+            curvature,
+            n_bins=10,
+            direction="reverse",
+            k=15,
+        )
+
+        assert len(result.bin_centers) > 0
+        assert len(result.psnrs) == len(result.bin_centers)
+        assert len(result.counts) == len(result.bin_centers)
+        assert result.direction == "reverse"
+
+        # All bins should have points
+        assert np.all(result.counts > 0)
+
+        # With curvature-dependent noise, high-curvature bins should have
+        # lower PSNR than low-curvature bins (monotonically decreasing trend)
+        valid = np.isfinite(result.psnrs)
+        if np.sum(valid) >= 2:
+            first_valid = result.psnrs[valid][0]
+            last_valid = result.psnrs[valid][-1]
+            assert first_valid > last_valid, (
+                f"Expected decreasing PSNR trend, got first={first_valid:.2f}, "
+                f"last={last_valid:.2f}"
+            )
+
+    def test_psnr_vs_curvature_forward_self(self, sphere_cloud):
+        """PSNR-vs-curvature curve should work with forward_self direction."""
+        original, reconstructed, curvature = sphere_cloud
+
+        result = CurvatureQualityCalculator.compute_psnr_vs_curvature_curve(
+            original,
+            reconstructed,
+            curvature,
+            n_bins=10,
+            direction="forward_self",
+            k=15,
+        )
+
+        assert result.direction == "forward_self"
+        assert len(result.bin_centers) > 0
+        assert np.any(np.isfinite(result.psnrs))
+
+    def test_stratified_psnr_invalid_direction(self):
+        """Invalid direction should raise ValueError."""
+        np.random.seed(42)
+        pts = np.random.randn(100, 3)
+        curv = np.random.rand(100)
+
+        with pytest.raises(ValueError, match="direction"):
+            CurvatureQualityCalculator.compute_stratified_psnr(
+                pts,
+                pts,
+                curv,
+                direction="invalid",
+            )
+
+    def test_curvature_computation_shape(self):
+        """Curvature computation should return correct shape and range."""
+        np.random.seed(42)
+        points = np.random.randn(200, 3)
+        curvature = CurvatureQualityCalculator.compute_curvature(points, k=10)
+
+        assert curvature.shape == (200,)
+        assert np.all(curvature >= 0)
+        assert np.all(curvature <= 1)
 
 
 if __name__ == "__main__":
