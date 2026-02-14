@@ -431,5 +431,260 @@ class TestCurvatureMetrics:
         assert np.all(curvature <= 1)
 
 
+class TestReverseDirection:
+    """Validate reverse-direction stratified PSNR on synthetic data."""
+
+    @pytest.fixture
+    def curvature_dependent_noise_cloud(self):
+        """Cloud where high-curvature points get more displacement.
+
+        A mixed surface: flat plane + curved bump. Noise magnitude is
+        proportional to curvature, simulating oversmoothing.
+        """
+        np.random.seed(42)
+        n = 3000
+        x = np.random.uniform(0, 100, n)
+        y = np.random.uniform(0, 100, n)
+        # Gaussian bump centered at (50,50): creates a curvature gradient
+        z = 10.0 * np.exp(-((x - 50) ** 2 + (y - 50) ** 2) / (2 * 20**2))
+        original = np.column_stack([x, y, z]).astype(np.float64)
+
+        curvature = CurvatureQualityCalculator.compute_curvature(original, k=20)
+
+        # Noise proportional to curvature (high-curv regions get more error)
+        noise_scale = 0.1 + 3.0 * (curvature / (curvature.max() + 1e-10))
+        noise = np.random.randn(n, 3) * noise_scale[:, None]
+        reconstructed = (original + noise).astype(np.float64)
+
+        return original, reconstructed, curvature
+
+    def test_reverse_degradation_positive(self, curvature_dependent_noise_cloud):
+        """Reverse degradation should be positive when edges have more error."""
+        original, reconstructed, curvature = curvature_dependent_noise_cloud
+
+        result = CurvatureQualityCalculator.compute_stratified_psnr(
+            original,
+            reconstructed,
+            curvature,
+            peak=100.0,
+            direction="reverse",
+            k=20,
+        )
+
+        assert result.direction == "reverse"
+        assert (
+            result.degradation > 0
+        ), f"Expected positive reverse degradation, got {result.degradation:.2f}"
+        assert (
+            result.flat_psnr > result.edge_psnr
+        ), f"Flat ({result.flat_psnr:.1f}) should exceed edge ({result.edge_psnr:.1f})"
+
+    def test_spearman_positive(self, curvature_dependent_noise_cloud):
+        """Spearman rho should be positive when curvature correlates with error."""
+        original, reconstructed, curvature = curvature_dependent_noise_cloud
+
+        corr = CurvatureQualityCalculator.compute_curvature_error_correlation(
+            original, reconstructed, curvature
+        )
+
+        assert corr.rho > 0, f"Expected positive Spearman rho, got {corr.rho:.4f}"
+        assert corr.p_value < 0.01, f"Expected significant p-value, got {corr.p_value}"
+
+    def test_random_control_near_zero(self, curvature_dependent_noise_cloud):
+        """Random shuffling should yield ~0 degradation."""
+        original, reconstructed, curvature = curvature_dependent_noise_cloud
+
+        result = CurvatureQualityCalculator.compute_random_stratified_psnr(
+            original,
+            reconstructed,
+            curvature,
+            peak=100.0,
+            direction="reverse",
+            n_iterations=50,
+        )
+
+        assert (
+            abs(result["mean_degradation"]) < 0.5
+        ), f"Random control mean should be ~0, got {result['mean_degradation']:.3f}"
+
+    def test_identical_clouds_zero_degradation(self):
+        """Identical clouds: inf PSNR, 0 degradation, all directions."""
+        np.random.seed(42)
+        points = np.random.randn(1000, 3) * 50
+        curvature = CurvatureQualityCalculator.compute_curvature(points, k=15)
+
+        for direction in ("forward", "reverse", "forward_self"):
+            result = CurvatureQualityCalculator.compute_stratified_psnr(
+                points,
+                points.copy(),
+                curvature,
+                direction=direction,
+                k=15,
+            )
+            assert result.flat_psnr == float("inf")
+            assert result.edge_psnr == float("inf")
+
+
+class TestPrecomputedEquivalence:
+    """Verify precomputed parameters produce identical results to fresh computation."""
+
+    @pytest.fixture
+    def test_clouds(self):
+        """Two clouds with different point counts (N != M)."""
+        np.random.seed(42)
+        n_orig, n_rec = 2000, 1800
+        original = np.random.randn(n_orig, 3).astype(np.float64) * 50
+        reconstructed = (original[:n_rec] + np.random.randn(n_rec, 3) * 0.5).astype(
+            np.float64
+        )
+        curvature = CurvatureQualityCalculator.compute_curvature(original, k=15)
+        return original, reconstructed, curvature
+
+    def test_stratified_psnr_precomputed_matches_fresh(self, test_clouds):
+        """Precomputed rec_curvature/rev_sq_dists/fwd_dists must match fresh."""
+        from scipy.spatial import cKDTree
+
+        original, reconstructed, curvature = test_clouds
+        k = 15
+
+        # Precompute
+        orig_tree = cKDTree(original)
+        fwd_dists_arr, fwd_nn_idx = orig_tree.query(reconstructed)
+        rec_tree = cKDTree(reconstructed)
+        rev_dists, _ = rec_tree.query(original)
+        rev_sq_dists = rev_dists**2
+        rec_curvature = CurvatureQualityCalculator.compute_curvature(reconstructed, k=k)
+
+        for direction in ("forward", "reverse", "forward_self"):
+            fresh = CurvatureQualityCalculator.compute_stratified_psnr(
+                original,
+                reconstructed,
+                curvature,
+                direction=direction,
+                k=k,
+            )
+
+            kwargs = {"rec_curvature": rec_curvature}
+            if direction == "reverse":
+                kwargs["rev_sq_dists"] = rev_sq_dists
+            else:
+                kwargs["fwd_dists"] = (fwd_dists_arr, fwd_nn_idx)
+
+            precomp = CurvatureQualityCalculator.compute_stratified_psnr(
+                original,
+                reconstructed,
+                curvature,
+                direction=direction,
+                k=k,
+                **kwargs,
+            )
+
+            assert abs(fresh.flat_psnr - precomp.flat_psnr) < 1e-10, (
+                f"{direction}: flat_psnr mismatch: "
+                f"fresh={fresh.flat_psnr}, precomp={precomp.flat_psnr}"
+            )
+            assert abs(fresh.edge_psnr - precomp.edge_psnr) < 1e-10, (
+                f"{direction}: edge_psnr mismatch: "
+                f"fresh={fresh.edge_psnr}, precomp={precomp.edge_psnr}"
+            )
+            assert abs(fresh.curvature_kl - precomp.curvature_kl) < 1e-10, (
+                f"{direction}: KL mismatch: "
+                f"fresh={fresh.curvature_kl}, precomp={precomp.curvature_kl}"
+            )
+
+    def test_psnr_curve_precomputed_matches_fresh(self, test_clouds):
+        """Precomputed params for PSNR-vs-curvature curve must match fresh."""
+        from scipy.spatial import cKDTree
+
+        original, reconstructed, curvature = test_clouds
+        k = 15
+
+        rec_tree = cKDTree(reconstructed)
+        rev_dists, _ = rec_tree.query(original)
+        rev_sq_dists = rev_dists**2
+
+        fresh = CurvatureQualityCalculator.compute_psnr_vs_curvature_curve(
+            original,
+            reconstructed,
+            curvature,
+            direction="reverse",
+            k=k,
+            n_bins=10,
+        )
+        precomp = CurvatureQualityCalculator.compute_psnr_vs_curvature_curve(
+            original,
+            reconstructed,
+            curvature,
+            direction="reverse",
+            k=k,
+            n_bins=10,
+            rev_sq_dists=rev_sq_dists,
+        )
+
+        np.testing.assert_array_almost_equal(fresh.psnrs, precomp.psnrs, decimal=10)
+        np.testing.assert_array_equal(fresh.counts, precomp.counts)
+
+    def test_random_control_precomputed_matches_fresh(self, test_clouds):
+        """Precomputed rev_sq_dists for random control must match fresh."""
+        from scipy.spatial import cKDTree
+
+        original, reconstructed, curvature = test_clouds
+
+        rec_tree = cKDTree(reconstructed)
+        rev_dists, _ = rec_tree.query(original)
+        rev_sq_dists = rev_dists**2
+
+        fresh = CurvatureQualityCalculator.compute_random_stratified_psnr(
+            original,
+            reconstructed,
+            curvature,
+            direction="reverse",
+            n_iterations=20,
+            seed=99,
+        )
+        precomp = CurvatureQualityCalculator.compute_random_stratified_psnr(
+            original,
+            reconstructed,
+            curvature,
+            direction="reverse",
+            n_iterations=20,
+            seed=99,
+            rev_sq_dists=rev_sq_dists,
+        )
+
+        assert abs(fresh["mean_degradation"] - precomp["mean_degradation"]) < 1e-10
+        assert abs(fresh["std_degradation"] - precomp["std_degradation"]) < 1e-10
+
+    def test_assignment_accuracy_precomputed_matches_fresh(self, test_clouds):
+        """Precomputed rec_curvature + fwd_nn_idx must match fresh."""
+        from scipy.spatial import cKDTree
+
+        original, reconstructed, curvature = test_clouds
+        k = 15
+
+        orig_tree = cKDTree(original)
+        _, fwd_nn_idx = orig_tree.query(reconstructed)
+        rec_curvature = CurvatureQualityCalculator.compute_curvature(reconstructed, k=k)
+
+        fresh = CurvatureQualityCalculator.compute_assignment_accuracy(
+            original,
+            reconstructed,
+            curvature,
+            k=k,
+        )
+        precomp = CurvatureQualityCalculator.compute_assignment_accuracy(
+            original,
+            reconstructed,
+            curvature,
+            k=k,
+            rec_curvature=rec_curvature,
+            fwd_nn_idx=fwd_nn_idx,
+        )
+
+        assert (
+            fresh == precomp
+        ), f"Assignment accuracy mismatch: fresh={fresh}, precomp={precomp}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
