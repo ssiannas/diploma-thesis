@@ -238,6 +238,8 @@ class CurvatureQualityCalculator:
         reconstructed: np.ndarray,
         curvature: np.ndarray,
         k: int = 30,
+        rec_curvature: Optional[np.ndarray] = None,
+        fwd_nn_idx: Optional[np.ndarray] = None,
     ) -> float:
         """Check how often NN-based curvature assignment agrees with direct computation.
 
@@ -254,21 +256,29 @@ class CurvatureQualityCalculator:
             reconstructed: (M, 3) reconstructed point coordinates.
             curvature: (N,) curvature values for original points.
             k: Number of neighbors for PCA curvature on the reconstructed cloud.
+            rec_curvature: Pre-computed curvature on reconstructed cloud.
+            fwd_nn_idx: Pre-computed forward NN indices (rec->orig).
 
         Returns:
             Agreement rate in [0, 1]. Values below ~0.8 indicate the forward-
             direction stratified PSNR is unreliable at this rate.
         """
         # Assigned tercile: via NN from reconstructed → original
-        _, nn_idx = CurvatureQualityCalculator.compute_per_point_error(
-            original, reconstructed
-        )
+        if fwd_nn_idx is not None:
+            nn_idx = fwd_nn_idx
+        else:
+            _, nn_idx = CurvatureQualityCalculator.compute_per_point_error(
+                original, reconstructed
+            )
         assigned_curvature = curvature[nn_idx]
 
         # Direct tercile: compute curvature on the reconstructed cloud
-        direct_curvature = CurvatureQualityCalculator.compute_curvature(
-            reconstructed, k=k
-        )
+        if rec_curvature is not None:
+            direct_curvature = rec_curvature
+        else:
+            direct_curvature = CurvatureQualityCalculator.compute_curvature(
+                reconstructed, k=k
+            )
 
         # Bin both into terciles
         def _to_tercile(values: np.ndarray) -> np.ndarray:
@@ -321,6 +331,56 @@ class CurvatureQualityCalculator:
         )
 
     @staticmethod
+    def _stratify_and_psnr(
+        sq_dists: np.ndarray,
+        strat_curvature: np.ndarray,
+        peak: float,
+        n_strata: int,
+    ) -> tuple[list[float], list[str], dict]:
+        """Core stratification: split sq_dists by curvature quantiles.
+
+        Returns (strata_psnrs, stratum_names, point_counts).
+        """
+
+        def _mse_to_psnr(sq_d: np.ndarray, peak_val: float) -> float:
+            if len(sq_d) == 0:
+                return float("nan")
+            mse = float(np.mean(sq_d))
+            if mse == 0:
+                return float("inf")
+            return 10.0 * np.log10(peak_val**2 / mse)
+
+        percentiles = np.linspace(0, 100, n_strata + 1)[1:-1]
+        thresholds = [np.percentile(strat_curvature, p) for p in percentiles]
+
+        masks = []
+        for i in range(n_strata):
+            if i == 0:
+                masks.append(strat_curvature <= thresholds[0])
+            elif i == n_strata - 1:
+                masks.append(strat_curvature > thresholds[-1])
+            else:
+                masks.append(
+                    (strat_curvature > thresholds[i - 1])
+                    & (strat_curvature <= thresholds[i])
+                )
+
+        strata_sq_dists = [sq_dists[m] for m in masks]
+        strata_psnrs = [_mse_to_psnr(sd, peak) for sd in strata_sq_dists]
+
+        if n_strata == 3:
+            stratum_names = ["flat", "medium", "edge"]
+        elif n_strata == 5:
+            stratum_names = ["very_flat", "flat", "medium", "edge", "sharp_edge"]
+        else:
+            stratum_names = [f"q{i+1}" for i in range(n_strata)]
+
+        point_counts = {
+            name: int(sd.size) for name, sd in zip(stratum_names, strata_sq_dists)
+        }
+        return strata_psnrs, stratum_names, point_counts
+
+    @staticmethod
     def compute_stratified_psnr(
         original: np.ndarray,
         reconstructed: np.ndarray,
@@ -329,6 +389,9 @@ class CurvatureQualityCalculator:
         n_strata: int = 3,
         direction: str = "forward",
         k: int = 30,
+        rec_curvature: Optional[np.ndarray] = None,
+        rev_sq_dists: Optional[np.ndarray] = None,
+        fwd_dists: Optional[tuple[np.ndarray, np.ndarray]] = None,
     ) -> StratifiedQualityMetrics:
         """Compute D1-PSNR separately for curvature-based strata.
 
@@ -357,6 +420,12 @@ class CurvatureQualityCalculator:
             direction: "forward", "reverse", or "forward_self".
             k: Number of neighbors for curvature estimation on reconstructed
                cloud (used by forward_self and for KL computation).
+            rec_curvature: Pre-computed curvature on reconstructed cloud.
+                Avoids redundant recomputation when calling multiple directions.
+            rev_sq_dists: Pre-computed reverse squared distances (orig->rec).
+                Only used when direction="reverse".
+            fwd_dists: Pre-computed forward (dists, nn_idx) tuple (rec->orig).
+                Only used when direction="forward" or "forward_self".
 
         Returns:
             StratifiedQualityMetrics with per-region PSNR and degradation.
@@ -376,90 +445,53 @@ class CurvatureQualityCalculator:
                 f"got '{direction}'"
             )
 
-        def _mse_to_psnr(sq_d: np.ndarray, peak_val: float) -> float:
-            if len(sq_d) == 0:
-                return float("nan")
-            mse = float(np.mean(sq_d))
-            if mse == 0:
-                return float("inf")
-            return 10.0 * np.log10(peak_val**2 / mse)
+        # Compute rec_curvature if not provided (needed for KL in all directions)
+        if rec_curvature is None:
+            rec_curvature = CurvatureQualityCalculator.compute_curvature(
+                reconstructed, k=k
+            )
 
         if direction == "forward_self":
-            # Compute curvature on reconstructed cloud
-            rec_curvature = CurvatureQualityCalculator.compute_curvature(
-                reconstructed, k=k
-            )
-            # Stratify by reconstructed curvature
             strat_curvature = rec_curvature
 
-            # Forward distances: rec→orig
-            dists, _ = CurvatureQualityCalculator.compute_per_point_error(
-                original, reconstructed
-            )
+            if fwd_dists is not None:
+                dists, _ = fwd_dists
+            else:
+                dists, _ = CurvatureQualityCalculator.compute_per_point_error(
+                    original, reconstructed
+                )
             sq_dists = dists**2
         elif direction == "forward":
-            # Forward: rec→orig, stratified by NN-inherited curvature
-            dists, nn_idx = CurvatureQualityCalculator.compute_per_point_error(
-                original, reconstructed
-            )
+            if fwd_dists is not None:
+                dists, nn_idx = fwd_dists
+            else:
+                dists, nn_idx = CurvatureQualityCalculator.compute_per_point_error(
+                    original, reconstructed
+                )
             sq_dists = dists**2
             strat_curvature = curvature[nn_idx]
-
-            # Compute rec curvature for KL (may reuse below)
-            rec_curvature = CurvatureQualityCalculator.compute_curvature(
-                reconstructed, k=k
-            )
         else:
-            # Reverse: orig→rec, stratified by original curvature
-            rec_tree = cKDTree(reconstructed)
-            dists, _ = rec_tree.query(original)
-            sq_dists = dists**2
+            # Reverse
+            if rev_sq_dists is not None:
+                sq_dists = rev_sq_dists
+            else:
+                rec_tree = cKDTree(reconstructed)
+                dists, _ = rec_tree.query(original)
+                sq_dists = dists**2
             strat_curvature = curvature
 
-            # Compute rec curvature for KL
-            rec_curvature = CurvatureQualityCalculator.compute_curvature(
-                reconstructed, k=k
+        strata_psnrs, stratum_names, point_counts = (
+            CurvatureQualityCalculator._stratify_and_psnr(
+                sq_dists, strat_curvature, peak, n_strata
             )
-
-        # Build quantile boundaries from the stratification curvature
-        percentiles = np.linspace(0, 100, n_strata + 1)[1:-1]
-        thresholds = [np.percentile(strat_curvature, p) for p in percentiles]
-
-        # Build masks for each stratum
-        masks = []
-        for i in range(n_strata):
-            if i == 0:
-                masks.append(strat_curvature <= thresholds[0])
-            elif i == n_strata - 1:
-                masks.append(strat_curvature > thresholds[-1])
-            else:
-                masks.append(
-                    (strat_curvature > thresholds[i - 1])
-                    & (strat_curvature <= thresholds[i])
-                )
-
-        strata_sq_dists = [sq_dists[masks[i]] for i in range(n_strata)]
-        strata_psnrs = [_mse_to_psnr(sd, peak) for sd in strata_sq_dists]
-
-        # Build stratum labels
-        if n_strata == 3:
-            stratum_names = ["flat", "medium", "edge"]
-        elif n_strata == 5:
-            stratum_names = ["very_flat", "flat", "medium", "edge", "sharp_edge"]
-        else:
-            stratum_names = [f"q{i+1}" for i in range(n_strata)]
+        )
 
         flat_psnr = strata_psnrs[0]
         medium_psnr = strata_psnrs[n_strata // 2]
         edge_psnr = strata_psnrs[-1]
         degradation = flat_psnr - edge_psnr
 
-        # KL divergence: compare independently-computed curvature distributions
         kl = CurvatureQualityCalculator.compute_curvature_kl(curvature, rec_curvature)
-
-        point_counts = {
-            name: int(sd.size) for name, sd in zip(stratum_names, strata_sq_dists)
-        }
 
         return StratifiedQualityMetrics(
             flat_psnr=flat_psnr,
@@ -560,6 +592,9 @@ class CurvatureQualityCalculator:
         n_bins: int = 20,
         direction: str = "reverse",
         k: int = 30,
+        rec_curvature: Optional[np.ndarray] = None,
+        rev_sq_dists: Optional[np.ndarray] = None,
+        fwd_dists: Optional[tuple[np.ndarray, np.ndarray]] = None,
     ) -> PSNRvsCurvatureResult:
         """Compute PSNR as a continuous function of curvature.
 
@@ -576,24 +611,34 @@ class CurvatureQualityCalculator:
             direction: "reverse" (use original curvature) or "forward_self"
                       (compute and use reconstructed curvature).
             k: Number of neighbors for curvature on reconstructed cloud.
+            rec_curvature: Pre-computed curvature on reconstructed cloud.
+            rev_sq_dists: Pre-computed reverse squared distances.
+            fwd_dists: Pre-computed forward (dists, nn_idx) tuple.
 
         Returns:
             PSNRvsCurvatureResult with bin centers, PSNRs, and counts.
         """
         if direction == "forward_self":
-            rec_curvature = CurvatureQualityCalculator.compute_curvature(
-                reconstructed, k=k
-            )
-            dists, _ = CurvatureQualityCalculator.compute_per_point_error(
-                original, reconstructed
-            )
+            if rec_curvature is None:
+                rec_curvature = CurvatureQualityCalculator.compute_curvature(
+                    reconstructed, k=k
+                )
             strat_curvature = rec_curvature
+            if fwd_dists is not None:
+                dists, _ = fwd_dists
+            else:
+                dists, _ = CurvatureQualityCalculator.compute_per_point_error(
+                    original, reconstructed
+                )
             sq_dists = dists**2
         elif direction == "reverse":
-            rec_tree = cKDTree(reconstructed)
-            dists, _ = rec_tree.query(original)
             strat_curvature = curvature
-            sq_dists = dists**2
+            if rev_sq_dists is not None:
+                sq_dists = rev_sq_dists
+            else:
+                rec_tree = cKDTree(reconstructed)
+                dists, _ = rec_tree.query(original)
+                sq_dists = dists**2
         else:
             raise ValueError(
                 f"direction must be 'reverse' or 'forward_self', got '{direction}'"
@@ -650,12 +695,16 @@ class CurvatureQualityCalculator:
         n_iterations: int = 100,
         direction: str = "reverse",
         seed: int = 42,
+        rev_sq_dists: Optional[np.ndarray] = None,
     ) -> dict:
         """Sanity check: stratified PSNR with random group assignments.
 
         Repeats the stratified PSNR computation with randomly shuffled
         curvature values. If the metric is valid, random stratification
         should yield ~0 degradation (all groups have similar error).
+
+        Precomputes distances once and only re-stratifies in each iteration,
+        avoiding redundant KD-tree builds and curvature recomputation.
 
         Args:
             original: (N, 3) original point coordinates.
@@ -666,26 +715,36 @@ class CurvatureQualityCalculator:
             n_iterations: Number of random trials.
             direction: Direction for stratified PSNR.
             seed: Random seed for reproducibility.
+            rev_sq_dists: Pre-computed reverse squared distances (orig->rec).
 
         Returns:
             Dict with 'mean_degradation', 'std_degradation', 'n_iterations'.
         """
-        rng = np.random.RandomState(seed)
-        degradations = []
-
-        for _ in range(n_iterations):
-            shuffled = rng.permutation(curvature)
-            result = CurvatureQualityCalculator.compute_stratified_psnr(
-                original,
-                reconstructed,
-                shuffled,
-                peak=peak,
-                n_strata=n_strata,
-                direction=direction,
+        # Precompute distances once
+        if direction == "reverse":
+            if rev_sq_dists is None:
+                rec_tree = cKDTree(reconstructed)
+                dists, _ = rec_tree.query(original)
+                sq_dists = dists**2
+            else:
+                sq_dists = rev_sq_dists
+        else:
+            dists, _ = CurvatureQualityCalculator.compute_per_point_error(
+                original, reconstructed
             )
-            degradations.append(result.degradation)
+            sq_dists = dists**2
 
-        degradations = np.array(degradations)
+        # Shuffle and re-stratify (no curvature/KL/tree recomputation)
+        rng = np.random.RandomState(seed)
+        degradations = np.empty(n_iterations)
+
+        for i in range(n_iterations):
+            shuffled = rng.permutation(curvature)
+            strata_psnrs, _, _ = CurvatureQualityCalculator._stratify_and_psnr(
+                sq_dists, shuffled, peak, n_strata
+            )
+            degradations[i] = strata_psnrs[0] - strata_psnrs[-1]
+
         return {
             "mean_degradation": float(np.mean(degradations)),
             "std_degradation": float(np.std(degradations)),

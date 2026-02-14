@@ -26,7 +26,7 @@ Usage:
         --output-dir results/oversmoothing \
         --random-control --workers 8
 
-    # G-PCC baseline at multiple quantization scales
+    # G-PCC Trisoup baseline (node sizes 6→2 = low→high bitrate)
     python scripts/analyze_oversmoothing.py \
         --input-dir datasets/8iVFB_small/ \
         --codec gpcc \
@@ -55,20 +55,14 @@ from pcml.data.loaders import PLYPointCloudLoader
 from pcml.frameworks.gpcc import GPCCAdapter
 from pcml.frameworks.pcgcv2 import PCGCv2Adapter
 from pcml.metrics.curvature import CurvatureQualityCalculator
-from pcml.visualization.oversmoothing import (
-    create_oversmoothing_report,
-    plot_correlation_vs_rate,
-    plot_nn_multiplicity,
-    plot_psnr_vs_curvature_curve,
-    plot_stratified_psnr_bars,
-)
+from pcml.visualization.oversmoothing import plot_stratified_psnr_bars
 
 logger = logging.getLogger(__name__)
 
 ALL_RATES = ["r1", "r2", "r3", "r4", "r5", "r6", "r7"]
 
-# Default G-PCC quantization scales (geometrically spaced)
-GPCC_CODING_SCALES = [0.03125, 0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+# Default G-PCC Trisoup node sizes (log2): higher = coarser = lower bitrate
+GPCC_TRISOUP_SIZES = [2, 3, 4, 5, 6]
 
 # 10-bit voxelized clouds use peak = 1023
 PEAK = 1023.0
@@ -88,15 +82,15 @@ def _load_or_run_codec(
     geometry: np.ndarray,
     rate_label: str,
     decoded_dir: Path,
-    rate: str | None = None,
-    coding_scale: float | None = None,
+    rate_spec: dict,
+    force: bool = False,
 ) -> tuple[np.ndarray, int, float]:
     """Load decoded cloud from cache, or run codec and cache it."""
     stem = _cache_stem(codec, rate_label)
     cloud_path = decoded_dir / f"{stem}.npy"
     meta_path = decoded_dir / f"{stem}_meta.json"
 
-    if cloud_path.exists() and meta_path.exists():
+    if not force and cloud_path.exists() and meta_path.exists():
         decoded_geometry = np.load(cloud_path)
         with open(meta_path) as f:
             meta = json.load(f)
@@ -109,9 +103,11 @@ def _load_or_run_codec(
 
     # Run codec
     if codec == "pcgcv2":
-        adapter = PCGCv2Adapter(rate_point=rate)
+        adapter = PCGCv2Adapter(rate_point=rate_spec["rate"])
     else:
-        adapter = GPCCAdapter(coding_scale=coding_scale)
+        # G-PCC: Trisoup mode
+        ns = rate_spec.get("trisoup_node_size_log2", 0)
+        adapter = GPCCAdapter(trisoup_node_size_log2=ns)
 
     t0 = time.time()
     comp_result, decoded_geometry = adapter.compress_and_decompress(geometry)
@@ -127,10 +123,7 @@ def _load_or_run_codec(
         "codec": codec,
         "rate_label": rate_label,
     }
-    if codec == "pcgcv2":
-        meta["rate_point"] = rate
-    else:
-        meta["coding_scale"] = coding_scale
+    meta.update({k: v for k, v in rate_spec.items() if k != "rate_label"})
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
 
@@ -144,6 +137,7 @@ def cache_all_clouds(
     rate_specs: list[dict],
     output_dir: Path,
     curvature_k: int,
+    force: bool = False,
 ) -> None:
     """Phase 1: ensure all decoded clouds + curvature are cached."""
     print("\n" + "=" * 60)
@@ -166,7 +160,7 @@ def cache_all_clouds(
 
         # Cache curvature
         curv_cache = decoded_dir / f"curvature_k{curvature_k}.npy"
-        if not curv_cache.exists():
+        if force or not curv_cache.exists():
             print(f"  [{stem}] Computing curvature (k={curvature_k})...")
             t0 = time.time()
             curvature = CurvatureQualityCalculator.compute_curvature(
@@ -187,8 +181,8 @@ def cache_all_clouds(
                     geometry=geometry,
                     rate_label=rl,
                     decoded_dir=decoded_dir,
-                    rate=rs.get("rate"),
-                    coding_scale=rs.get("coding_scale"),
+                    rate_spec=rs,
+                    force=force,
                 )
             except Exception as e:
                 print(f"    ERROR [{stem}/{rl}]: {e}")
@@ -205,7 +199,6 @@ def _compute_metrics_for_rate(
     decoded_dir: Path,
     codec: str,
     rate_label: str,
-    coding_scale: float | None,
     curvature_k: int,
     n_strata: int,
     random_control: bool,
@@ -243,7 +236,31 @@ def _compute_metrics_for_rate(
     print(f"  {tag}: computing metrics (BPP={bpp:.4f})...")
     t0 = time.time()
 
-    # Forward stratified PSNR
+    # ── Precompute shared quantities once ────────────────────────────
+    from scipy.spatial import cKDTree
+
+    # Forward NN: rec → orig (dists + nn_idx)
+    orig_tree = cKDTree(geometry)
+    fwd_dists_arr, fwd_nn_idx = orig_tree.query(decoded_geometry)
+    fwd_dists = (fwd_dists_arr, fwd_nn_idx)
+
+    # Reverse NN: orig → rec (squared distances)
+    rec_tree = cKDTree(decoded_geometry)
+    rev_dists, _ = rec_tree.query(geometry)
+    rev_sq_dists = rev_dists**2
+
+    # Curvature on reconstructed cloud (expensive, compute once)
+    rec_curvature = CurvatureQualityCalculator.compute_curvature(
+        decoded_geometry, k=curvature_k
+    )
+
+    # Overall PSNR (from forward distances)
+    overall_mse = float(np.mean(fwd_dists_arr**2))
+    overall_psnr = (
+        10.0 * np.log10(PEAK**2 / overall_mse) if overall_mse > 0 else float("inf")
+    )
+
+    # ── Metric calls (all reuse precomputed data) ────────────────────
     fwd_metrics = CurvatureQualityCalculator.compute_stratified_psnr(
         geometry,
         decoded_geometry,
@@ -252,9 +269,10 @@ def _compute_metrics_for_rate(
         n_strata=n_strata,
         direction="forward",
         k=curvature_k,
+        rec_curvature=rec_curvature,
+        fwd_dists=fwd_dists,
     )
 
-    # Reverse stratified PSNR
     rev_metrics = CurvatureQualityCalculator.compute_stratified_psnr(
         geometry,
         decoded_geometry,
@@ -263,9 +281,10 @@ def _compute_metrics_for_rate(
         n_strata=n_strata,
         direction="reverse",
         k=curvature_k,
+        rec_curvature=rec_curvature,
+        rev_sq_dists=rev_sq_dists,
     )
 
-    # Forward-self
     fwd_self_metrics = CurvatureQualityCalculator.compute_stratified_psnr(
         geometry,
         decoded_geometry,
@@ -274,9 +293,11 @@ def _compute_metrics_for_rate(
         n_strata=n_strata,
         direction="forward_self",
         k=curvature_k,
+        rec_curvature=rec_curvature,
+        fwd_dists=fwd_dists,
     )
 
-    # Spearman correlation
+    # Spearman correlation (uses reverse distances)
     corr = CurvatureQualityCalculator.compute_curvature_error_correlation(
         geometry, decoded_geometry, curvature
     )
@@ -286,7 +307,7 @@ def _compute_metrics_for_rate(
         geometry, decoded_geometry, curvature, n_strata=n_strata
     )
 
-    # Continuous PSNR curve
+    # Continuous PSNR curve (reuses reverse distances)
     psnr_curve = CurvatureQualityCalculator.compute_psnr_vs_curvature_curve(
         geometry,
         decoded_geometry,
@@ -295,22 +316,13 @@ def _compute_metrics_for_rate(
         n_bins=20,
         direction="reverse",
         k=curvature_k,
-    )
-
-    # Overall PSNR
-    dists, _ = CurvatureQualityCalculator.compute_per_point_error(
-        geometry, decoded_geometry
-    )
-    overall_mse = float(np.mean(dists**2))
-    overall_psnr = (
-        10.0 * np.log10(PEAK**2 / overall_mse) if overall_mse > 0 else float("inf")
+        rev_sq_dists=rev_sq_dists,
     )
 
     result = {
         "codec": codec,
         "sequence": stem,
         "rate_label": rate_label,
-        "coding_scale": coding_scale,
         "bpp": bpp,
         "overall_psnr": overall_psnr,
         "flat_psnr": fwd_metrics.flat_psnr,
@@ -343,13 +355,18 @@ def _compute_metrics_for_rate(
         "point_counts": fwd_metrics.point_counts,
     }
 
-    # Assignment accuracy
+    # Assignment accuracy (reuses rec_curvature and fwd NN indices)
     accuracy = CurvatureQualityCalculator.compute_assignment_accuracy(
-        geometry, decoded_geometry, curvature, k=curvature_k
+        geometry,
+        decoded_geometry,
+        curvature,
+        k=curvature_k,
+        rec_curvature=rec_curvature,
+        fwd_nn_idx=fwd_nn_idx,
     )
     result["assignment_accuracy"] = accuracy
 
-    # Random control
+    # Random control (reuses reverse distances)
     if random_control:
         rand_result = CurvatureQualityCalculator.compute_random_stratified_psnr(
             geometry,
@@ -358,6 +375,7 @@ def _compute_metrics_for_rate(
             peak=PEAK,
             n_strata=n_strata,
             direction="reverse",
+            rev_sq_dists=rev_sq_dists,
         )
         result["random_mean_degradation"] = rand_result["mean_degradation"]
         result["random_std_degradation"] = rand_result["std_degradation"]
@@ -405,7 +423,6 @@ def compute_all_metrics_parallel(
                 decoded_dir=decoded_dir,
                 codec=codec,
                 rate_label=rs["rate_label"],
-                coding_scale=rs.get("coding_scale"),
                 curvature_k=curvature_k,
                 n_strata=n_strata,
                 random_control=random_control,
@@ -440,11 +457,19 @@ def generate_all_plots(
     all_results: list[dict],
     output_dir: Path,
     input_files: list[Path],
+    cache_base_dir: Path | None = None,
 ) -> None:
-    """Phase 3: generate all plots from computed results."""
+    """Phase 3: generate all plots from computed results.
+
+    Args:
+        output_dir: Where to save plots (run-specific dir).
+        cache_base_dir: Where decoded clouds live. If None, uses output_dir.
+    """
     print("=" * 60)
     print("PHASE 3: Generating plots")
     print("=" * 60)
+
+    cloud_base = cache_base_dir if cache_base_dir is not None else output_dir
 
     # Group results by (codec, sequence)
     by_seq: dict[str, list[dict]] = {}
@@ -454,78 +479,12 @@ def generate_all_plots(
             by_seq[seq] = []
         by_seq[seq].append(r)
 
-    # Per-sequence plots
+    # Per-sequence cross-rate summary plots (no per-rate plots)
     for stem, seq_results in by_seq.items():
         codec = seq_results[0]["codec"]
         file_output_dir = output_dir / stem
         file_output_dir.mkdir(parents=True, exist_ok=True)
-        decoded_dir = output_dir / "decoded_clouds" / stem
 
-        # Per-rate report plots
-        orig_path = decoded_dir / "original.npy"
-        curv_k = seq_results[0]["curvature_k"]
-        curv_path = decoded_dir / f"curvature_k{curv_k}.npy"
-
-        if orig_path.exists() and curv_path.exists():
-            geometry = np.load(orig_path)
-            curvature = np.load(curv_path)
-
-            for r in seq_results:
-                rl = r["rate_label"]
-                cloud_stem = _cache_stem(codec, rl)
-                dec_path = decoded_dir / f"{cloud_stem}.npy"
-                if not dec_path.exists():
-                    continue
-                decoded_geometry = np.load(dec_path)
-
-                # Full report
-                report_path = file_output_dir / f"report_{codec}_{rl}.png"
-                fig = create_oversmoothing_report(
-                    geometry,
-                    decoded_geometry,
-                    curvature,
-                    metrics=r,
-                    rate_label=f"{stem} @ {rl} [{codec}]",
-                    output_path=str(report_path),
-                )
-                plt.close(fig)
-
-                # PSNR vs curvature curve
-                fig, ax = plt.subplots(figsize=(10, 6))
-                plot_psnr_vs_curvature_curve(
-                    r["psnr_curve_centers"],
-                    r["psnr_curve_psnrs"],
-                    r["psnr_curve_counts"],
-                    ax=ax,
-                    title=(f"PSNR vs Curvature (rev) " f"— {stem} @ {rl} [{codec}]"),
-                )
-                fig.savefig(
-                    file_output_dir / f"psnr_vs_curvature_{codec}_{rl}.png",
-                    dpi=150,
-                    bbox_inches="tight",
-                )
-                plt.close(fig)
-
-                # NN multiplicity
-                fig, ax = plt.subplots(figsize=(8, 5))
-                mult_means = {
-                    "flat": r["mult_flat_mean"],
-                    "medium": r["mult_medium_mean"],
-                    "edge": r["mult_edge_mean"],
-                }
-                plot_nn_multiplicity(
-                    mult_means,
-                    ax=ax,
-                    title=(f"NN Multiplicity " f"— {stem} @ {rl} [{codec}]"),
-                )
-                fig.savefig(
-                    file_output_dir / f"nn_multiplicity_{codec}_{rl}.png",
-                    dpi=150,
-                    bbox_inches="tight",
-                )
-                plt.close(fig)
-
-        # Cross-rate plots
         if len(seq_results) >= 2:
             _generate_cross_rate_plots(seq_results, stem, codec, file_output_dir)
 
@@ -539,54 +498,19 @@ def generate_all_plots(
 def _generate_cross_rate_plots(
     results: list[dict], stem: str, codec: str, output_dir: Path
 ) -> None:
-    """Generate cross-rate summary plots for a single sequence."""
+    """Generate cross-rate summary plots for a single sequence.
+
+    Produces 2 plots per sequence:
+      1. Degradation vs rate (3 metric directions)
+      2. Stratified PSNR bars (reverse direction — the reliable metric)
+    """
     rate_labels = [r["rate_label"] for r in results]
-    flat_psnrs = [r["flat_psnr"] for r in results]
-    medium_psnrs = [r["medium_psnr"] for r in results]
-    edge_psnrs = [r["edge_psnr"] for r in results]
-    degradations = [r["degradation"] for r in results]
     bpps = [r["bpp"] for r in results]
-
-    # Stratified PSNR bar chart (forward)
-    fig, ax = plt.subplots(figsize=(10, 6))
-    plot_stratified_psnr_bars(
-        rate_labels,
-        flat_psnrs,
-        medium_psnrs,
-        edge_psnrs,
-        ax=ax,
-        title=f"Stratified PSNR (fwd) — {stem} [{codec}]",
-    )
-    fig.savefig(
-        output_dir / f"stratified_psnr_bars_{codec}.png",
-        dpi=150,
-        bbox_inches="tight",
-    )
-    plt.close(fig)
-
-    # Stratified PSNR bar chart (reverse)
-    rev_flat = [r["rev_flat_psnr"] for r in results]
-    rev_medium = [r["rev_medium_psnr"] for r in results]
-    rev_edge = [r["rev_edge_psnr"] for r in results]
-    fig, ax = plt.subplots(figsize=(10, 6))
-    plot_stratified_psnr_bars(
-        rate_labels,
-        rev_flat,
-        rev_medium,
-        rev_edge,
-        ax=ax,
-        title=f"Stratified PSNR (rev) — {stem} [{codec}]",
-    )
-    fig.savefig(
-        output_dir / f"stratified_psnr_bars_rev_{codec}.png",
-        dpi=150,
-        bbox_inches="tight",
-    )
-    plt.close(fig)
-
-    # Degradation vs rate — three directions
+    degradations = [r["degradation"] for r in results]
     rev_degradations = [r["rev_degradation"] for r in results]
     fwd_self_degradations = [r["fwd_self_degradation"] for r in results]
+
+    # 1. Degradation vs rate — three directions
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(
         bpps,
@@ -637,110 +561,29 @@ def _generate_cross_rate_plots(
     )
     plt.close(fig)
 
-    # NN multiplicity vs rate
-    mult_flat = [r["mult_flat_mean"] for r in results]
-    mult_edge = [r["mult_edge_mean"] for r in results]
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(
-        bpps,
-        mult_flat,
-        "o-",
-        color="steelblue",
-        linewidth=2,
-        markersize=8,
-        label="Flat",
-    )
-    ax.plot(
-        bpps,
-        mult_edge,
-        "s-",
-        color="firebrick",
-        linewidth=2,
-        markersize=8,
-        label="Edge",
-    )
-    for label, bpp, mf, me in zip(rate_labels, bpps, mult_flat, mult_edge):
-        ax.annotate(
-            label,
-            (bpp, me),
-            textcoords="offset points",
-            xytext=(5, 8),
-            fontsize=8,
-        )
-    ax.set_xlabel("Bits Per Point (BPP)")
-    ax.set_ylabel("Mean NN Multiplicity")
-    ax.set_title(f"NN Multiplicity vs Rate — {stem} [{codec}]")
-    ax.legend()
-    ax.grid(alpha=0.3)
-    fig.savefig(
-        output_dir / f"multiplicity_vs_rate_{codec}.png",
-        dpi=150,
-        bbox_inches="tight",
-    )
-    plt.close(fig)
-
-    # Spearman correlation vs rate
-    rhos = [r["spearman_rho"] for r in results]
-    pvals = [r["spearman_pvalue"] for r in results]
-    fig, ax = plt.subplots(figsize=(8, 5))
-    plot_correlation_vs_rate(
+    # 2. Stratified PSNR bar chart (reverse — the reliable direction)
+    rev_flat = [r["rev_flat_psnr"] for r in results]
+    rev_medium = [r["rev_medium_psnr"] for r in results]
+    rev_edge = [r["rev_edge_psnr"] for r in results]
+    fig, ax = plt.subplots(figsize=(10, 6))
+    plot_stratified_psnr_bars(
         rate_labels,
-        rhos,
-        pvals,
-        bpps,
+        rev_flat,
+        rev_medium,
+        rev_edge,
         ax=ax,
-        title=f"Spearman Correlation — {stem} [{codec}]",
+        title=f"Stratified PSNR (rev) — {stem} [{codec}]",
     )
     fig.savefig(
-        output_dir / f"correlation_vs_rate_{codec}.png",
+        output_dir / f"stratified_psnr_bars_rev_{codec}.png",
         dpi=150,
         bbox_inches="tight",
     )
     plt.close(fig)
-
-    # Assignment accuracy vs rate
-    if "assignment_accuracy" in results[0]:
-        accuracies = [r["assignment_accuracy"] for r in results]
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.plot(
-            bpps,
-            accuracies,
-            "o-",
-            color="forestgreen",
-            linewidth=2,
-            markersize=8,
-        )
-        for label, bpp, acc in zip(rate_labels, bpps, accuracies):
-            ax.annotate(
-                f"{label}",
-                (bpp, acc),
-                textcoords="offset points",
-                xytext=(5, 8),
-                fontsize=9,
-            )
-        ax.set_xlabel("Bits Per Point (BPP)")
-        ax.set_ylabel("Assignment Accuracy")
-        ax.set_title(f"NN Assignment Accuracy — {stem} [{codec}]")
-        ax.grid(alpha=0.3)
-        ax.axhline(
-            y=0.8,
-            color="red",
-            linestyle="--",
-            alpha=0.5,
-            label="Reliability threshold",
-        )
-        ax.set_ylim(0, 1.05)
-        ax.legend()
-        fig.savefig(
-            output_dir / f"assignment_accuracy_{codec}.png",
-            dpi=150,
-            bbox_inches="tight",
-        )
-        plt.close(fig)
 
 
 def _generate_cross_sequence_summary(all_results: list[dict], output_dir: Path) -> None:
-    """Generate cross-sequence comparison plots."""
+    """Generate cross-sequence comparison: 1 plot per codec showing all sequences."""
     summary_dir = output_dir / "summary"
     summary_dir.mkdir(parents=True, exist_ok=True)
 
@@ -758,7 +601,7 @@ def _generate_cross_sequence_summary(all_results: list[dict], output_dir: Path) 
         if len(sequences) < 2:
             continue
 
-        # Cross-sequence reverse degradation
+        # 1. Cross-sequence reverse degradation
         fig, ax = plt.subplots(figsize=(10, 6))
         for seq_name, seq_results in sequences.items():
             seq_sorted = sorted(seq_results, key=lambda x: x["bpp"])
@@ -783,7 +626,7 @@ def _generate_cross_sequence_summary(all_results: list[dict], output_dir: Path) 
         plt.close(fig)
         print(f"  Saved: {path}")
 
-        # Cross-sequence Spearman
+        # 2. Cross-sequence Spearman correlation
         fig, ax = plt.subplots(figsize=(10, 6))
         for seq_name, seq_results in sequences.items():
             seq_sorted = sorted(seq_results, key=lambda x: x["bpp"])
@@ -804,45 +647,6 @@ def _generate_cross_sequence_summary(all_results: list[dict], output_dir: Path) 
         ax.grid(alpha=0.3)
         ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
         path = summary_dir / f"cross_sequence_correlation_{codec}.png"
-        fig.savefig(path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"  Saved: {path}")
-
-        # Combined degradation (both directions)
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-        for seq_name, seq_results in sequences.items():
-            seq_sorted = sorted(seq_results, key=lambda x: x["bpp"])
-            bpps = [r["bpp"] for r in seq_sorted]
-            fwd_d = [r["degradation"] for r in seq_sorted]
-            rev_d = [r["rev_degradation"] for r in seq_sorted]
-            ax1.plot(
-                bpps,
-                fwd_d,
-                "o-",
-                label=seq_name,
-                linewidth=2,
-                markersize=6,
-            )
-            ax2.plot(
-                bpps,
-                rev_d,
-                "o-",
-                label=seq_name,
-                linewidth=2,
-                markersize=6,
-            )
-        for ax, title in [
-            (ax1, "Forward (rec->orig)"),
-            (ax2, "Reverse (orig->rec)"),
-        ]:
-            ax.set_xlabel("Bits Per Point (BPP)")
-            ax.set_ylabel("Degradation [dB]")
-            ax.set_title(f"Degradation — {title} [{codec}]")
-            ax.legend()
-            ax.grid(alpha=0.3)
-            ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
-        plt.tight_layout()
-        path = summary_dir / f"degradation_vs_rate_{codec}.png"
         fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"  Saved: {path}")
@@ -900,10 +704,13 @@ def _save_aggregated_results(all_results: list[dict], output_dir: Path) -> pd.Da
     # DataFrame
     df = pd.DataFrame(scalar_results)
 
-    # Parquet
+    # Parquet (optional — requires pyarrow or fastparquet)
     parquet_path = output_dir / "all_results.parquet"
-    df.to_parquet(parquet_path, index=False)
-    print(f"Saved parquet results: {parquet_path}")
+    try:
+        df.to_parquet(parquet_path, index=False)
+        print(f"Saved parquet results: {parquet_path}")
+    except ImportError:
+        print(f"WARN: pyarrow not installed, skipping parquet output")
 
     # CSV
     csv_path = output_dir / "all_results.csv"
@@ -918,17 +725,21 @@ def _save_aggregated_results(all_results: list[dict], output_dir: Path) -> pd.Da
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _build_rate_specs(codec: str, rates: list[str]) -> list[dict]:
+def _build_rate_specs(
+    codec: str, rates: list[str], trisoup_sizes: list[int] | None = None
+) -> list[dict]:
     if codec == "pcgcv2":
-        return [{"rate_label": r, "rate": r, "coding_scale": None} for r in rates]
+        return [{"rate_label": r, "rate": r} for r in rates]
     else:
+        # Trisoup mode (default for G-PCC lossy)
+        sizes = trisoup_sizes if trisoup_sizes else GPCC_TRISOUP_SIZES
+        # Sort descending: larger node = coarser = lower bitrate (like r1→r7)
         return [
             {
-                "rate_label": f"qs{qs}",
-                "rate": None,
-                "coding_scale": qs,
+                "rate_label": f"ts{ns}",
+                "trisoup_node_size_log2": ns,
             }
-            for qs in GPCC_CODING_SCALES
+            for ns in sorted(sizes, reverse=True)
         ]
 
 
@@ -969,12 +780,12 @@ def main():
         help="PCGCv2 rate points. Ignored for G-PCC.",
     )
     parser.add_argument(
-        "--gpcc-scales",
+        "--gpcc-trisoup-sizes",
         nargs="+",
-        type=float,
+        type=int,
         default=None,
-        help="G-PCC coding scales (default: built-in 7 values). "
-        "Only used with --codec gpcc.",
+        help="G-PCC Trisoup node sizes (log2), e.g. 2 3 4 5 6. "
+        "Higher = coarser = lower bitrate. Only used with --codec gpcc.",
     )
     parser.add_argument(
         "--output-dir",
@@ -1004,6 +815,18 @@ def main():
         help="Number of parallel workers for metric computation " "(default: 4).",
     )
     parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Run identifier for output subfolder "
+        "(default: codec name, e.g. 'pcgcv2').",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force re-run codec even if decoded clouds are cached.",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
     )
@@ -1014,12 +837,10 @@ def main():
     else:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = Path(args.output_dir)
+    base_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.gpcc_scales is not None and args.codec == "gpcc":
-        global GPCC_CODING_SCALES
-        GPCC_CODING_SCALES = sorted(args.gpcc_scales)
+    trisoup_sizes = args.gpcc_trisoup_sizes if args.codec == "gpcc" else None
 
     # Collect input files
     if args.input:
@@ -1031,26 +852,42 @@ def main():
             print(f"No .ply files found in {input_dir}")
             sys.exit(1)
 
-    rate_specs = _build_rate_specs(args.codec, args.rates)
+    # Run ID determines the results subfolder (decoded clouds stay shared)
+    run_id = args.run_id if args.run_id else args.codec
+    results_dir = base_dir / run_id
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    rate_specs = _build_rate_specs(args.codec, args.rates, trisoup_sizes)
     n_tasks = len(input_files) * len(rate_specs)
     max_workers = min(args.workers, n_tasks)
 
     print(f"Codec:       {args.codec}")
+    print(f"Run ID:      {run_id}")
     print(f"Input files: {len(input_files)}")
     print(f"Rate points: {[rs['rate_label'] for rs in rate_specs]}")
     print(f"Total tasks: {n_tasks}")
     print(f"Workers:     {max_workers}")
-    print(f"Output dir:  {output_dir}")
+    print(f"Cache dir:   {base_dir / 'decoded_clouds'}")
+    print(f"Results dir: {results_dir}")
+    if args.force:
+        print("Force mode:  ON (ignoring cached decoded clouds)")
 
-    # Phase 1: cache decoded clouds (sequential)
-    cache_all_clouds(input_files, args.codec, rate_specs, output_dir, args.curvature_k)
+    # Phase 1: cache decoded clouds (sequential, shared across runs)
+    cache_all_clouds(
+        input_files,
+        args.codec,
+        rate_specs,
+        base_dir,
+        args.curvature_k,
+        force=args.force,
+    )
 
     # Phase 2: compute metrics (parallel)
     all_results = compute_all_metrics_parallel(
         input_files=input_files,
         codec=args.codec,
         rate_specs=rate_specs,
-        output_dir=output_dir,
+        output_dir=base_dir,
         curvature_k=args.curvature_k,
         n_strata=args.n_strata,
         random_control=args.random_control,
@@ -1061,11 +898,11 @@ def main():
         print("\nNo results generated.")
         sys.exit(1)
 
-    # Save aggregated results
-    df = _save_aggregated_results(all_results, output_dir)
+    # Save aggregated results (into run-specific dir)
+    df = _save_aggregated_results(all_results, results_dir)
 
-    # Phase 3: generate plots (sequential)
-    generate_all_plots(all_results, output_dir, input_files)
+    # Phase 3: generate plots (into run-specific dir)
+    generate_all_plots(all_results, results_dir, input_files, base_dir)
 
     # Summary table
     print(f"\n{'='*80}")

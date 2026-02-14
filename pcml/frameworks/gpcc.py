@@ -1,17 +1,17 @@
 """G-PCC (MPEG TMC13) adapter.
 
 Supports both lossless and lossy geometry compression. For lossy mode,
-``coding_scale`` controls the quantization step: values < 1.0 quantize
-the geometry (lower = more aggressive quantization = lower bitrate).
+Trisoup (surface triangulation) is used with ``trisoup_node_size_log2``
+controlling the rate: larger values = coarser surface = lower bitrate.
 
 Usage:
     # Lossless (default)
     adapter = GPCCAdapter()
     compressed, result = adapter.compress(geometry)
 
-    # Lossy at various rates
-    for qs in [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]:
-        adapter = GPCCAdapter(coding_scale=qs)
+    # Lossy at various Trisoup node sizes
+    for ns in [2, 3, 4, 5, 6]:
+        adapter = GPCCAdapter(trisoup_node_size_log2=ns)
         result, decoded = adapter.compress_and_decompress(geometry)
 """
 
@@ -33,20 +33,30 @@ class GPCCAdapter(BaseAdapter):
     Args:
         tmc3_path: Path to the tmc3 binary.
         config_path: Optional path to a G-PCC config file.
-        coding_scale: Geometry coding scale (1.0 = lossless, <1.0 = lossy).
-            Lower values quantize more aggressively, reducing bitrate.
+        trisoup_node_size_log2: Trisoup node size (log2). Values >= 2 enable
+            lossy Trisoup mode: higher = coarser = lower bitrate. 0 = lossless
+            octree (default).
+        coding_scale: (Deprecated) Geometry coding scale. Use
+            trisoup_node_size_log2 instead for lossy mode.
     """
 
     def __init__(
         self,
         tmc3_path: str = "frameworks/mpeg-pcc-tmc13/build/tmc3/tmc3",
         config_path: Optional[str] = None,
+        trisoup_node_size_log2: int = 0,
         coding_scale: float = 1.0,
     ):
-        name = "G-PCC" if coding_scale == 1.0 else f"G-PCC_qs{coding_scale}"
+        if trisoup_node_size_log2 >= 2:
+            name = f"G-PCC_ts{trisoup_node_size_log2}"
+        elif coding_scale != 1.0:
+            name = f"G-PCC_qs{coding_scale}"
+        else:
+            name = "G-PCC"
         super().__init__(name)
         self.tmc3_path = Path(tmc3_path)
         self.config_path = Path(config_path) if config_path else None
+        self.trisoup_node_size_log2 = trisoup_node_size_log2
         self.coding_scale = coding_scale
 
         if not self.tmc3_path.exists():
@@ -74,7 +84,9 @@ class GPCCAdapter(BaseAdapter):
             if self.config_path:
                 cmd.append(f"--config={self.config_path}")
 
-            if self.coding_scale != 1.0:
+            if self.trisoup_node_size_log2 >= 2:
+                cmd.append(f"--trisoupNodeSizeLog2={self.trisoup_node_size_log2}")
+            elif self.coding_scale != 1.0:
                 cmd.append(f"--codingScale={self.coding_scale}")
 
             start_time = time.time()
@@ -101,6 +113,7 @@ class GPCCAdapter(BaseAdapter):
                 compression_time_seconds=compression_time,
                 decompression_time_seconds=0.0,
                 metadata={
+                    "trisoup_node_size_log2": self.trisoup_node_size_log2,
                     "coding_scale": self.coding_scale,
                     "num_points_input": len(geometry),
                     "num_points_output": (
