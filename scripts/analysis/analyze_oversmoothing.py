@@ -51,9 +51,9 @@ matplotlib.use("Agg")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from pcml.adapters.gpcc import GPCCAdapter
+from pcml.adapters.pcgcv2 import PCGCv2Adapter
 from pcml.data.loaders import PLYPointCloudLoader
-from pcml.frameworks.gpcc import GPCCAdapter
-from pcml.frameworks.pcgcv2 import PCGCv2Adapter
 from pcml.metrics.curvature import CurvatureQualityCalculator
 from pcml.visualization.oversmoothing import plot_stratified_psnr_bars
 

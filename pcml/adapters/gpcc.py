@@ -23,8 +23,8 @@ from typing import Optional
 
 import numpy as np
 
+from pcml.adapters.base import BaseAdapter, CompressionResult
 from pcml.data.loaders import PLYPointCloudLoader, PointCloudData
-from pcml.frameworks.base import BaseAdapter, CompressionResult
 
 
 class GPCCAdapter(BaseAdapter):

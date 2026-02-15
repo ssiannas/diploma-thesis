@@ -16,9 +16,9 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from pcml.adapters.gpcc import GPCCAdapter
+from pcml.adapters.pcc_geo_cnn_v2 import PCCGeoCNNv2Adapter
 from pcml.data.loaders import PLYPointCloudLoader
-from pcml.frameworks.gpcc import GPCCAdapter
-from pcml.frameworks.pcc_geo_cnn_v2 import PCCGeoCNNv2Adapter
 from pcml.metrics.quality import GeometryQualityCalculator
 
 
