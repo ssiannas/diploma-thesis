@@ -54,25 +54,46 @@ def extract_patches(
     stride: int = 32,
     min_points: int = 100,
 ) -> List[np.ndarray]:
-    """Extract cubic patches from a point cloud. Returns list of index arrays."""
+    """Extract cubic patches from a point cloud. Returns list of index arrays.
+
+    Uses spatial binning for O(N) instead of O(N * V) complexity.
+    """
+    from collections import defaultdict
+
     mins = coords.min(axis=0)
     maxs = coords.max(axis=0)
 
+    # Bin points into grid cells of size `stride`
+    cell_idx = np.floor((coords - mins) / stride).astype(np.int32)
+    cell_points: Dict[tuple, List[int]] = defaultdict(list)
+    for i, c in enumerate(cell_idx):
+        cell_points[(c[0], c[1], c[2])].append(i)
+
+    # How many cells each patch spans per dimension
+    cells_per_patch = int(np.ceil(patch_size / stride))
+    n_cells = np.floor((maxs - mins) / stride).astype(int) + 1
+
     patches = []
-    for x in range(int(mins[0]), int(maxs[0]) + 1, stride):
-        for y in range(int(mins[1]), int(maxs[1]) + 1, stride):
-            for z in range(int(mins[2]), int(maxs[2]) + 1, stride):
-                mask = (
-                    (coords[:, 0] >= x)
-                    & (coords[:, 0] < x + patch_size)
-                    & (coords[:, 1] >= y)
-                    & (coords[:, 1] < y + patch_size)
-                    & (coords[:, 2] >= z)
-                    & (coords[:, 2] < z + patch_size)
-                )
-                indices = np.where(mask)[0]
-                if len(indices) >= min_points:
-                    patches.append(indices)
+    for cx in range(n_cells[0]):
+        for cy in range(n_cells[1]):
+            for cz in range(n_cells[2]):
+                # Gather point indices from all cells this patch covers
+                candidates = []
+                for dx in range(cells_per_patch):
+                    for dy in range(cells_per_patch):
+                        for dz in range(cells_per_patch):
+                            key = (cx + dx, cy + dy, cz + dz)
+                            if key in cell_points:
+                                candidates.extend(cell_points[key])
+                if len(candidates) < min_points:
+                    continue
+                # Exact bounds check for non-aligned edges
+                origin = mins + np.array([cx, cy, cz]) * stride
+                pts = coords[candidates]
+                mask = np.all((pts >= origin) & (pts < origin + patch_size), axis=1)
+                valid = np.array(candidates)[mask]
+                if len(valid) >= min_points:
+                    patches.append(valid)
     return patches
 
 
