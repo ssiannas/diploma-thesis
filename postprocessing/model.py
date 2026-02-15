@@ -11,18 +11,18 @@ import torch.nn as nn
 
 
 class ResBlock(nn.Module):
-    """Two sparse conv3x3 + BN + ReLU with residual connection."""
+    """Two sparse conv3x3 + InstanceNorm + ReLU with residual connection."""
 
     def __init__(self, channels: int):
         super().__init__()
         self.conv1 = ME.MinkowskiConvolution(
             channels, channels, kernel_size=3, stride=1, bias=False, dimension=3
         )
-        self.bn1 = ME.MinkowskiBatchNorm(channels)
+        self.bn1 = ME.MinkowskiInstanceNorm(channels)
         self.conv2 = ME.MinkowskiConvolution(
             channels, channels, kernel_size=3, stride=1, bias=False, dimension=3
         )
-        self.bn2 = ME.MinkowskiBatchNorm(channels)
+        self.bn2 = ME.MinkowskiInstanceNorm(channels)
 
     def forward(self, x):
         residual = x
@@ -51,19 +51,19 @@ class SparseUNet(nn.Module):
         self.conv_in = ME.MinkowskiConvolution(
             in_channels, 32, kernel_size=3, stride=1, bias=False, dimension=3
         )
-        self.bn_in = ME.MinkowskiBatchNorm(32)
+        self.bn_in = ME.MinkowskiInstanceNorm(32)
         self.enc_block1 = ResBlock(32)
 
         self.down1 = ME.MinkowskiConvolution(
             32, 64, kernel_size=2, stride=2, bias=False, dimension=3
         )
-        self.bn_down1 = ME.MinkowskiBatchNorm(64)
+        self.bn_down1 = ME.MinkowskiInstanceNorm(64)
         self.enc_block2 = ResBlock(64)
 
         self.down2 = ME.MinkowskiConvolution(
             64, 128, kernel_size=2, stride=2, bias=False, dimension=3
         )
-        self.bn_down2 = ME.MinkowskiBatchNorm(128)
+        self.bn_down2 = ME.MinkowskiInstanceNorm(128)
         self.enc_block3 = ResBlock(128)
 
         # Bottleneck
@@ -73,21 +73,21 @@ class SparseUNet(nn.Module):
         self.up2 = ME.MinkowskiConvolutionTranspose(
             128, 64, kernel_size=2, stride=2, bias=False, dimension=3
         )
-        self.bn_up2 = ME.MinkowskiBatchNorm(64)
+        self.bn_up2 = ME.MinkowskiInstanceNorm(64)
         self.dec_merge2 = ME.MinkowskiConvolution(
             128, 64, kernel_size=1, stride=1, bias=False, dimension=3
         )
-        self.bn_merge2 = ME.MinkowskiBatchNorm(64)
+        self.bn_merge2 = ME.MinkowskiInstanceNorm(64)
         self.dec_block2 = ResBlock(64)
 
         self.up1 = ME.MinkowskiConvolutionTranspose(
             64, 32, kernel_size=2, stride=2, bias=False, dimension=3
         )
-        self.bn_up1 = ME.MinkowskiBatchNorm(32)
+        self.bn_up1 = ME.MinkowskiInstanceNorm(32)
         self.dec_merge1 = ME.MinkowskiConvolution(
             64, 32, kernel_size=1, stride=1, bias=False, dimension=3
         )
-        self.bn_merge1 = ME.MinkowskiBatchNorm(32)
+        self.bn_merge1 = ME.MinkowskiInstanceNorm(32)
         self.dec_block1 = ResBlock(32)
 
         # Head

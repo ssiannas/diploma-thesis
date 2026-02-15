@@ -19,6 +19,7 @@ Usage (multi-frame, multi-rate):
 
 import argparse
 import logging
+import math
 import time
 from pathlib import Path
 
@@ -74,8 +75,8 @@ def parse_args():
         "--alpha", type=float, default=10.0, help="Curvature weighting strength"
     )
     p.add_argument("--batch_size", type=int, default=4)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--lr_decay_epoch", type=int, default=20)
+    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--warmup_epochs", type=int, default=5)
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--save_dir", type=str, default="models/postprocessing")
     p.add_argument("--num_workers", type=int, default=4)
@@ -167,7 +168,7 @@ def _build_datasets(args):
     return train_ds, val_ds, collate_fn, rate
 
 
-def train_one_epoch(model, loader, optimizer, device, alpha):
+def train_one_epoch(model, loader, optimizer, device, alpha, max_grad_norm=1.0):
     model.train()
     total_loss = 0.0
     n_batches = 0
@@ -188,6 +189,7 @@ def train_one_epoch(model, loader, optimizer, device, alpha):
 
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
 
         total_loss += loss.item()
@@ -252,10 +254,36 @@ def main():
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Model parameters: {n_params:,}")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer, step_size=args.lr_decay_epoch, gamma=0.5
+    # AdamW with decoupled weight decay (exclude norm params)
+    decay_params = []
+    no_decay_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "bn" in name or "norm" in name:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": decay_params, "weight_decay": 1e-2},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ],
+        lr=args.lr,
     )
+
+    # Linear warmup then cosine annealing
+    warmup_epochs = args.warmup_epochs
+
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            # Linear warmup from lr/10 to lr
+            return 0.1 + 0.9 * epoch / warmup_epochs
+        # Cosine decay to lr/100
+        progress = (epoch - warmup_epochs) / max(args.epochs - warmup_epochs, 1)
+        return 0.01 + 0.99 * 0.5 * (1 + math.cos(progress * math.pi))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     best_val_loss = float("inf")
 
