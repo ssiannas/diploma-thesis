@@ -17,6 +17,10 @@ Usage (multi-frame, multi-rate):
         --epochs 50 --batch_size 4
 """
 
+import os
+
+os.environ.setdefault("OMP_NUM_THREADS", "20")
+
 import argparse
 import logging
 import math
@@ -26,16 +30,19 @@ from pathlib import Path
 import MinkowskiEngine as ME
 import torch
 from dataset import SEQUENCES, MultiFrameDataset, PatchPairDataset
-from losses import curvature_weighted_l1_loss
+from losses import (
+    KendallUncertaintyWeights,
+    chamfer_loss,
+    curvature_weighted_l1_loss,
+    laplacian_loss,
+    min_of_k_displacement_loss,
+    stratified_displacement_loss,
+    stratified_loss,
+)
 from model import SparseUNet
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%H:%M:%S",
-)
 logger = logging.getLogger(__name__)
 
 # Sequences available in multi-frame layout
@@ -87,6 +94,70 @@ def parse_args():
         default=None,
         help="Limit number of clouds to load (for debugging)",
     )
+    p.add_argument(
+        "--frame_stride",
+        type=int,
+        default=1,
+        help="Keep every Nth frame per (sequence, rate) to reduce temporal redundancy",
+    )
+    p.add_argument(
+        "--no_augment", action="store_true", help="Disable data augmentation"
+    )
+    p.add_argument(
+        "--loss_type",
+        type=str,
+        default="displacement",
+        choices=[
+            "displacement",
+            "chamfer",
+            "laplacian",
+            "stratified",
+            "stratified_disp",
+        ],
+        help="Loss function type",
+    )
+    p.add_argument(
+        "--chamfer_weight",
+        type=float,
+        default=0.1,
+        help="Weight for Chamfer regularizer when using laplacian loss",
+    )
+    p.add_argument(
+        "--laplacian_k",
+        type=int,
+        default=8,
+        help="Number of neighbors for Laplacian computation",
+    )
+    p.add_argument(
+        "--smooth_l1_beta",
+        type=float,
+        default=0.0,
+        help="Smooth L1 beta (0 = standard L1)",
+    )
+    p.add_argument(
+        "--lambda_shrink",
+        type=float,
+        default=0.0,
+        help="L2 shrinkage penalty weight for zero-GT predictions (0 = disabled)",
+    )
+    p.add_argument(
+        "--displacement_k",
+        type=int,
+        default=1,
+        help="NN candidates for min-of-K loss (1=standard)",
+    )
+    p.add_argument(
+        "--log_file",
+        type=str,
+        default=None,
+        help="Path to log file (logs to both file and stderr)",
+    )
+    p.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume from (loads model + optimizer state)",
+    )
     return p.parse_args()
 
 
@@ -121,6 +192,9 @@ def _build_datasets(args):
             min_points=args.min_points,
             curvature_k=args.curvature_k,
             max_clouds=args.max_clouds,
+            augment=not args.no_augment,
+            frame_stride=args.frame_stride,
+            displacement_k=args.displacement_k,
         )
         logger.info("Loading validation data...")
         val_ds = MultiFrameDataset(
@@ -131,6 +205,10 @@ def _build_datasets(args):
             stride=args.stride,
             min_points=args.min_points,
             curvature_k=args.curvature_k,
+            max_clouds=args.max_clouds,
+            augment=False,
+            frame_stride=args.frame_stride,
+            displacement_k=args.displacement_k,
         )
         collate_fn = MultiFrameDataset.collate_fn
         return train_ds, val_ds, collate_fn, rate_label
@@ -168,10 +246,108 @@ def _build_datasets(args):
     return train_ds, val_ds, collate_fn, rate
 
 
-def train_one_epoch(model, loader, optimizer, device, alpha, max_grad_norm=1.0):
+def _compute_loss(
+    pred,
+    sin,
+    gt_disp,
+    curv,
+    loss_type,
+    alpha,
+    smooth_l1_beta,
+    chamfer_weight,
+    laplacian_k,
+    kendall=None,
+    beta=5.0,
+    lambda_shrink=0.0,
+):
+    """Dispatch to the appropriate loss function.
+
+    Returns (loss, extras_dict) where extras_dict has per-component losses for logging.
+    gt_disp is (N, 3) for K=1 or (N, K, 3) for K>1 (min-of-K).
+    """
+    # Min-of-K: gt_disp has shape (N, K, 3) with K > 1
+    if gt_disp.ndim == 3 and gt_disp.shape[1] > 1:
+        return (
+            min_of_k_displacement_loss(
+                pred,
+                gt_disp,
+                curv,
+                alpha=alpha,
+                smooth_l1_beta=smooth_l1_beta,
+                lambda_shrink=lambda_shrink,
+            ),
+            {},
+        )
+
+    if loss_type == "stratified_disp":
+        total, edge_l, flat_l = stratified_displacement_loss(
+            pred,
+            gt_disp,
+            curv,
+            kendall,
+            smooth_l1_beta=smooth_l1_beta,
+            beta=beta,
+        )
+        return total, {"edge_loss": edge_l.item(), "flat_loss": flat_l.item()}
+    if loss_type == "stratified":
+        total, edge_l, flat_l = stratified_loss(
+            pred,
+            sin,
+            gt_disp,
+            curv,
+            kendall,
+            alpha=alpha,
+            k=laplacian_k,
+            beta=beta,
+        )
+        return total, {"edge_loss": edge_l.item(), "flat_loss": flat_l.item()}
+    if loss_type == "laplacian":
+        lap = laplacian_loss(pred, sin, gt_disp, curv, alpha=alpha, k=laplacian_k)
+        if chamfer_weight > 0:
+            lap = lap + chamfer_weight * chamfer_loss(
+                pred, sin, gt_disp, curv, alpha=alpha
+            )
+        return lap, {}
+    elif loss_type == "chamfer":
+        return chamfer_loss(pred, sin, gt_disp, curv, alpha=alpha), {}
+    else:
+        return (
+            curvature_weighted_l1_loss(
+                pred,
+                gt_disp,
+                curv,
+                alpha=alpha,
+                smooth_l1_beta=smooth_l1_beta,
+                lambda_shrink=lambda_shrink,
+            ),
+            {},
+        )
+
+
+def train_one_epoch(
+    model,
+    loader,
+    optimizer,
+    device,
+    alpha,
+    smooth_l1_beta=0.0,
+    loss_type="displacement",
+    max_grad_norm=1.0,
+    chamfer_weight=0.1,
+    laplacian_k=8,
+    kendall=None,
+    beta=5.0,
+    lambda_shrink=0.0,
+):
     model.train()
     total_loss = 0.0
     n_batches = 0
+    total_pred_abs = 0.0
+    total_gt_abs = 0.0
+    total_near_zero = 0
+    total_points = 0
+    total_grad_norm = 0.0
+    total_extras = {}
 
     for coords, feats, displacements, curvature in tqdm(
         loader, desc="Train", leave=False
@@ -185,24 +361,77 @@ def train_one_epoch(model, loader, optimizer, device, alpha, max_grad_norm=1.0):
         curv = curvature.float().to(device)
 
         pred = model(sin)
-        loss = curvature_weighted_l1_loss(pred, gt_disp, curv, alpha=alpha)
+        loss, extras = _compute_loss(
+            pred,
+            sin,
+            gt_disp,
+            curv,
+            loss_type,
+            alpha,
+            smooth_l1_beta,
+            chamfer_weight,
+            laplacian_k,
+            kendall=kendall,
+            beta=beta,
+            lambda_shrink=lambda_shrink,
+        )
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
 
+        # Diagnostics
+        with torch.no_grad():
+            pred_mag = pred.F.norm(dim=-1)
+            gt_mag = gt_disp.norm(dim=-1)
+            n_pts = pred_mag.shape[0]
+            total_pred_abs += pred_mag.sum().item()
+            total_gt_abs += gt_mag.sum().item()
+            total_near_zero += (pred_mag < 0.01).sum().item()
+            total_points += n_pts
+            total_grad_norm += grad_norm.item()
+
         total_loss += loss.item()
+        for k_extra, v in extras.items():
+            total_extras[k_extra] = total_extras.get(k_extra, 0.0) + v
         n_batches += 1
 
-    return total_loss / max(n_batches, 1)
+    n = max(n_batches, 1)
+    stats = {
+        "loss": total_loss / n,
+        "pred_mean_abs": total_pred_abs / max(total_points, 1),
+        "gt_mean_abs": total_gt_abs / max(total_points, 1),
+        "pred_near_zero_pct": 100.0 * total_near_zero / max(total_points, 1),
+        "grad_norm": total_grad_norm / n,
+    }
+    for k_extra, v in total_extras.items():
+        stats[k_extra] = v / n
+    return stats
 
 
 @torch.no_grad()
-def validate(model, loader, device, alpha):
+def validate(
+    model,
+    loader,
+    device,
+    alpha,
+    smooth_l1_beta=0.0,
+    loss_type="displacement",
+    chamfer_weight=0.1,
+    laplacian_k=8,
+    kendall=None,
+    beta=5.0,
+    lambda_shrink=0.0,
+):
     model.eval()
     total_loss = 0.0
     n_batches = 0
+    total_pred_abs = 0.0
+    total_gt_abs = 0.0
+    total_near_zero = 0
+    total_points = 0
+    total_extras = {}
 
     for coords, feats, displacements, curvature in tqdm(
         loader, desc="Val", leave=False
@@ -216,20 +445,73 @@ def validate(model, loader, device, alpha):
         curv = curvature.float().to(device)
 
         pred = model(sin)
-        loss = curvature_weighted_l1_loss(pred, gt_disp, curv, alpha=alpha)
+        loss, extras = _compute_loss(
+            pred,
+            sin,
+            gt_disp,
+            curv,
+            loss_type,
+            alpha,
+            smooth_l1_beta,
+            chamfer_weight,
+            laplacian_k,
+            kendall=kendall,
+            beta=beta,
+            lambda_shrink=lambda_shrink,
+        )
+
+        pred_mag = pred.F.norm(dim=-1)
+        gt_mag = gt_disp.norm(dim=-1)
+        n_pts = pred_mag.shape[0]
+        total_pred_abs += pred_mag.sum().item()
+        total_gt_abs += gt_mag.sum().item()
+        total_near_zero += (pred_mag < 0.01).sum().item()
+        total_points += n_pts
 
         total_loss += loss.item()
+        for k_extra, v in extras.items():
+            total_extras[k_extra] = total_extras.get(k_extra, 0.0) + v
         n_batches += 1
 
-    return total_loss / max(n_batches, 1)
+    n = max(n_batches, 1)
+    stats = {
+        "loss": total_loss / n,
+        "pred_mean_abs": total_pred_abs / max(total_points, 1),
+        "gt_mean_abs": total_gt_abs / max(total_points, 1),
+        "pred_near_zero_pct": 100.0 * total_near_zero / max(total_points, 1),
+    }
+    for k_extra, v in total_extras.items():
+        stats[k_extra] = v / n
+    return stats
+
+
+def _setup_logging(log_file: str = None):
+    """Configure logging to stderr + optional file."""
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    # stderr handler
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+
+    if log_file:
+        fh = logging.FileHandler(log_file, mode="w")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+        logger.info(f"Logging to {log_file}")
 
 
 def main():
     args = parse_args()
+    _setup_logging(args.log_file)
+
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    logger.info(f"Args: {vars(args)}")
     logger.info(f"Curvature weighting alpha={args.alpha}")
 
     train_dataset, val_dataset, collate_fn, rate_label = _build_datasets(args)
@@ -254,6 +536,14 @@ def main():
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Model parameters: {n_params:,}")
 
+    # Kendall uncertainty weights for stratified loss
+    kendall = None
+    if args.loss_type in ("stratified", "stratified_disp"):
+        kendall = KendallUncertaintyWeights(n_tasks=2).to(device)
+        logger.info(
+            "Using Kendall learned uncertainty weighting (2 tasks: edge + flat)"
+        )
+
     # AdamW with decoupled weight decay (exclude norm params)
     decay_params = []
     no_decay_params = []
@@ -264,13 +554,41 @@ def main():
             no_decay_params.append(param)
         else:
             decay_params.append(param)
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": decay_params, "weight_decay": 1e-2},
-            {"params": no_decay_params, "weight_decay": 0.0},
-        ],
-        lr=args.lr,
-    )
+    param_groups = [
+        {"params": decay_params, "weight_decay": 1e-2},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ]
+    if kendall is not None:
+        param_groups.append({"params": kendall.parameters(), "weight_decay": 0.0})
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
+
+    # Resume from checkpoint
+    start_epoch = 1
+    best_val_loss = float("inf")
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        prev_args = ckpt.get("args", {})
+        prev_rates = prev_args.get("rates", [])
+        curr_rates = args.rates or [args.rate or "r7"]
+        same_config = (
+            set(prev_rates) == set(curr_rates) and prev_args.get("lr") == args.lr
+        )
+        if same_config:
+            # Same rates + LR: full resume (optimizer, epoch, best_val)
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            start_epoch = ckpt["epoch"] + 1
+            best_val_loss = ckpt.get("val_loss", float("inf"))
+            logger.info(
+                f"Resumed from {args.resume} (epoch {ckpt['epoch']}, "
+                f"val_loss={ckpt.get('val_loss', '?')})"
+            )
+        else:
+            # Different config (curriculum): model weights only, fresh optimizer
+            logger.info(
+                f"Loaded model weights from {args.resume} (epoch {ckpt['epoch']}). "
+                f"Fresh optimizer for new config: rates={curr_rates}, lr={args.lr}"
+            )
 
     # Linear warmup then cosine annealing
     warmup_epochs = args.warmup_epochs
@@ -285,52 +603,112 @@ def main():
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    best_val_loss = float("inf")
+    n_train = len(train_dataset)
+    n_val = len(val_dataset)
+    n_tc = len(train_dataset.decoded_clouds)
+    n_vc = len(val_dataset.decoded_clouds)
+    logger.info(
+        f"Train: {n_train} patches from {n_tc} clouds | "
+        f"Val: {n_val} patches from {n_vc} clouds"
+    )
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         t0 = time.time()
 
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, args.alpha)
-        val_loss = validate(model, val_loader, device, args.alpha)
+        # Beta annealing for stratified loss: 1 -> 10 over training
+        beta = 1.0 + 9.0 * (epoch - 1) / max(args.epochs - 1, 1)
+
+        t_stats = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            args.alpha,
+            args.smooth_l1_beta,
+            args.loss_type,
+            chamfer_weight=args.chamfer_weight,
+            laplacian_k=args.laplacian_k,
+            kendall=kendall,
+            beta=beta,
+            lambda_shrink=args.lambda_shrink,
+        )
+        v_stats = validate(
+            model,
+            val_loader,
+            device,
+            args.alpha,
+            args.smooth_l1_beta,
+            args.loss_type,
+            chamfer_weight=args.chamfer_weight,
+            laplacian_k=args.laplacian_k,
+            kendall=kendall,
+            beta=beta,
+            lambda_shrink=args.lambda_shrink,
+        )
         scheduler.step()
 
         elapsed = time.time() - t0
         lr = optimizer.param_groups[0]["lr"]
+        gap = v_stats["loss"] - t_stats["loss"]
         logger.info(
             f"Epoch {epoch:3d}/{args.epochs} | "
-            f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} | "
+            f"train={t_stats['loss']:.4f} val={v_stats['loss']:.4f} gap={gap:.4f} | "
             f"lr={lr:.1e} | {elapsed:.1f}s"
         )
+        t, v = t_stats, v_stats
+        logger.info(
+            f"  pred_abs: train={t['pred_mean_abs']:.4f} "
+            f"val={v['pred_mean_abs']:.4f} | "
+            f"gt_abs: train={t['gt_mean_abs']:.4f} "
+            f"val={v['gt_mean_abs']:.4f}"
+        )
+        logger.info(
+            f"  near_zero%%: train={t['pred_near_zero_pct']:.1f} "
+            f"val={v['pred_near_zero_pct']:.1f} | "
+            f"grad_norm={t['grad_norm']:.4f}"
+        )
+        # Stratified loss diagnostics
+        if "edge_loss" in t:
+            kw = kendall.weights() if kendall else [1.0, 1.0]
+            logger.info(
+                f"  edge: t={t['edge_loss']:.4f} "
+                f"v={v.get('edge_loss', 0):.4f} | "
+                f"flat: t={t['flat_loss']:.4f} "
+                f"v={v.get('flat_loss', 0):.4f} | "
+                f"beta={beta:.1f} | "
+                f"kw=[{kw[0]:.3f}, {kw[1]:.3f}]"
+            )
 
         # Save best model
+        val_loss = v_stats["loss"]
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             ckpt_path = save_dir / f"best_{rate_label}.pt"
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "val_loss": val_loss,
-                    "args": vars(args),
-                },
-                ckpt_path,
-            )
-            logger.info(f"  Saved best model (val_loss={val_loss:.4f})")
+            ckpt_data = {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "val_loss": val_loss,
+                "args": vars(args),
+            }
+            if kendall is not None:
+                ckpt_data["kendall_state_dict"] = kendall.state_dict()
+            torch.save(ckpt_data, ckpt_path)
+            logger.info(f"  * New best (val_loss={val_loss:.4f})")
 
         # Save periodic checkpoint
-        if epoch % 10 == 0:
+        if epoch % 3 == 0:
             ckpt_path = save_dir / f"epoch_{epoch}_{rate_label}.pt"
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "val_loss": val_loss,
-                    "args": vars(args),
-                },
-                ckpt_path,
-            )
+            ckpt_data = {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "val_loss": val_loss,
+                "args": vars(args),
+            }
+            if kendall is not None:
+                ckpt_data["kendall_state_dict"] = kendall.state_dict()
+            torch.save(ckpt_data, ckpt_path)
 
     logger.info(f"Training complete. Best val_loss: {best_val_loss:.4f}")
 

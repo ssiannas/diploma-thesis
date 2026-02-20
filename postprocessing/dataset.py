@@ -115,10 +115,12 @@ class PatchPairDataset(Dataset):
         stride: int = 32,
         min_points: int = 100,
         curvature_k: int = 30,
+        augment: bool = False,
     ):
         self.data_root = Path(data_root)
         self.rate = rate
         self.patch_size = patch_size
+        self.augment = augment
         self.patches: List[Tuple[int, np.ndarray]] = []  # (cloud_idx, indices)
 
         self.decoded_clouds = []
@@ -159,9 +161,16 @@ class PatchPairDataset(Dataset):
     def __getitem__(self, idx: int):
         cloud_idx, point_indices = self.patches[idx]
 
-        coords = self.decoded_clouds[cloud_idx][point_indices]
+        coords = self.decoded_clouds[cloud_idx][point_indices].copy()
         curvature = self.curvatures[cloud_idx][point_indices]
-        displacement = self.displacements[cloud_idx][point_indices]
+        displacement = self.displacements[cloud_idx][point_indices].copy()
+
+        # Random rigid augmentation: axis permutation + sign flips
+        if self.augment:
+            axes = np.random.permutation(3)
+            signs = np.random.choice([-1, 1], size=3).astype(np.float32)
+            coords = coords[:, axes] * signs
+            displacement = displacement[:, axes] * signs
 
         # Features: normalized coords + curvature
         features = np.column_stack(
@@ -214,13 +223,18 @@ class MultiFrameDataset(Dataset):
         min_points: int = 100,
         curvature_k: int = 30,
         max_clouds: Optional[int] = None,
+        augment: bool = False,
+        frame_stride: int = 1,
+        displacement_k: int = 1,
     ):
         self.data_root = Path(data_root)
         self.patch_size = patch_size
+        self.augment = augment
+        self.displacement_k = displacement_k
         self.patches: List[Tuple[int, np.ndarray]] = []
 
         self.decoded_clouds: List[np.ndarray] = []
-        self.displacements: List[np.ndarray] = []
+        self.displacements: List[np.ndarray] = []  # (N, 3) if K=1, (N, K, 3) if K>1
         self.curvatures: List[np.ndarray] = []
 
         # Load manifest and filter
@@ -232,6 +246,19 @@ class MultiFrameDataset(Dataset):
             manifest = [e for e in manifest if e["sequence"] in sequences]
         if rates is not None:
             manifest = [e for e in manifest if e["rate"] in rates]
+        # Subsample frames to reduce temporal redundancy
+        if frame_stride > 1:
+            from collections import defaultdict
+
+            groups = defaultdict(list)
+            for e in manifest:
+                groups[(e["sequence"], e["rate"])].append(e)
+            subsampled = []
+            for key, entries in groups.items():
+                entries.sort(key=lambda e: e["frame"])
+                subsampled.extend(entries[::frame_stride])
+            manifest = subsampled
+
         if max_clouds is not None:
             manifest = manifest[:max_clouds]
 
@@ -255,8 +282,11 @@ class MultiFrameDataset(Dataset):
             decoded = np.load(decoded_path).astype(np.float32)
 
             # Try precomputed displacement and curvature
-            disp_path = frame_dir / f"displacement_{rate}.npy"
             curv_path = frame_dir / f"curvature_{rate}.npy"
+            if displacement_k > 1:
+                disp_path = frame_dir / f"displacement_k{displacement_k}_{rate}.npy"
+            else:
+                disp_path = frame_dir / f"displacement_{rate}.npy"
 
             if disp_path.exists() and curv_path.exists():
                 displacement = np.load(disp_path)
@@ -272,9 +302,22 @@ class MultiFrameDataset(Dataset):
                 original = original_cache[cache_key]
 
                 tree = cKDTree(original)
-                _, nn_idx = tree.query(decoded)
-                displacement = (original[nn_idx] - decoded).astype(np.float32)
-                curvature = compute_curvature(decoded, k=curvature_k)
+                if displacement_k > 1:
+                    _, nn_idx = tree.query(decoded, k=displacement_k)  # (N, K)
+                    displacement = (
+                        original[nn_idx] - decoded[:, np.newaxis, :]
+                    ).astype(
+                        np.float32
+                    )  # (N, K, 3)
+                else:
+                    _, nn_idx = tree.query(decoded)
+                    displacement = (original[nn_idx] - decoded).astype(np.float32)
+
+                # Load precomputed curvature if available
+                if curv_path.exists():
+                    curvature = np.load(curv_path)
+                else:
+                    curvature = compute_curvature(decoded, k=curvature_k)
 
             cloud_idx = len(self.decoded_clouds)
             self.decoded_clouds.append(decoded)
@@ -300,9 +343,19 @@ class MultiFrameDataset(Dataset):
     def __getitem__(self, idx: int):
         cloud_idx, point_indices = self.patches[idx]
 
-        coords = self.decoded_clouds[cloud_idx][point_indices]
+        coords = self.decoded_clouds[cloud_idx][point_indices].copy()
         curvature = self.curvatures[cloud_idx][point_indices]
-        displacement = self.displacements[cloud_idx][point_indices]
+        displacement = self.displacements[cloud_idx][point_indices].copy()
+
+        # Random rigid augmentation: axis permutation + sign flips
+        if self.augment:
+            axes = np.random.permutation(3)
+            signs = np.random.choice([-1, 1], size=3).astype(np.float32)
+            coords = coords[:, axes] * signs
+            if displacement.ndim == 3:  # (N, K, 3)
+                displacement = displacement[:, :, axes] * signs
+            else:  # (N, 3)
+                displacement = displacement[:, axes] * signs
 
         features = np.column_stack(
             [
