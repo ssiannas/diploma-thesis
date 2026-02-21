@@ -50,30 +50,49 @@ def curvature_weighted_l1_loss(
     mag_floor: float = 0.1,
     smooth_l1_beta: float = 0.0,
     lambda_shrink: float = 0.0,
+    shrink_gamma: float = 0.0,
+    edge_threshold: float = 0.0,
 ) -> torch.Tensor:
-    """L1 displacement loss with curvature and magnitude weighting.
+    """Displacement loss with optional edge masking and curvature-gated shrinkage.
 
-    When lambda_shrink > 0, adds an L2 penalty on predictions where GT is zero,
-    explicitly pushing flat-region predictions to zero.
+    When edge_threshold > 0: displacement loss only on edge points
+    (curvature > threshold), shrinkage only on flat points. No conflicting
+    gradients -- flat regions get "predict zero", edges get "match GT".
     """
-    curv_w = 1.0 + alpha * curvature.unsqueeze(-1)  # (N, 1)
-
-    gt_mag = gt_displacement.norm(dim=-1, keepdim=True)  # (N, 1)
-    nonzero_mask = (gt_mag > 1e-6).float()
-    mag_w = mag_floor + (1.0 - mag_floor) * nonzero_mask  # (N, 1)
-
     if smooth_l1_beta > 0:
-        per_point_loss = F.smooth_l1_loss(
+        per_point = F.smooth_l1_loss(
             pred.F, gt_displacement, reduction="none", beta=smooth_l1_beta
         )
     else:
-        per_point_loss = torch.abs(pred.F - gt_displacement)
-    loss = (curv_w * mag_w * per_point_loss).mean()
+        per_point = torch.abs(pred.F - gt_displacement)
+
+    if edge_threshold > 0:
+        # Hard edge mask: displacement loss only on high-curvature points
+        edge_mask = curvature > edge_threshold  # (N,)
+        if edge_mask.any():
+            loss = per_point[edge_mask].mean()
+        else:
+            loss = torch.tensor(0.0, device=pred.F.device)
+    else:
+        # Legacy: full weighted displacement loss
+        curv_w = 1.0 + alpha * curvature.unsqueeze(-1)
+        gt_mag = gt_displacement.norm(dim=-1, keepdim=True)
+        nonzero_mask = (gt_mag > 1e-6).float()
+        mag_w = mag_floor + (1.0 - mag_floor) * nonzero_mask
+        loss = (curv_w * mag_w * per_point).mean()
 
     if lambda_shrink > 0:
-        zero_mask = gt_mag.squeeze(-1) < 1e-6  # (N,)
-        if zero_mask.any():
-            loss = loss + lambda_shrink * pred.F[zero_mask].pow(2).mean()
+        if shrink_gamma > 0:
+            flat_w = torch.exp(-shrink_gamma * curvature)  # (N,)
+            shrink = (flat_w * pred.F.pow(2).sum(dim=-1)).mean()
+        else:
+            gt_mag = gt_displacement.norm(dim=-1)
+            zero_mask = gt_mag < 1e-6
+            if zero_mask.any():
+                shrink = pred.F[zero_mask].pow(2).mean()
+            else:
+                shrink = torch.tensor(0.0, device=pred.F.device)
+        loss = loss + lambda_shrink * shrink
 
     return loss
 

@@ -141,6 +141,18 @@ def parse_args():
         help="L2 shrinkage penalty weight for zero-GT predictions (0 = disabled)",
     )
     p.add_argument(
+        "--shrink_gamma",
+        type=float,
+        default=0.0,
+        help="Curvature gating for shrinkage (0=binary, >0=soft)",
+    )
+    p.add_argument(
+        "--edge_threshold",
+        type=float,
+        default=0.0,
+        help="Curvature threshold for edge masking (0=disabled)",
+    )
+    p.add_argument(
         "--displacement_k",
         type=int,
         default=1,
@@ -259,6 +271,8 @@ def _compute_loss(
     kendall=None,
     beta=5.0,
     lambda_shrink=0.0,
+    shrink_gamma=0.0,
+    edge_threshold=0.0,
 ):
     """Dispatch to the appropriate loss function.
 
@@ -319,6 +333,8 @@ def _compute_loss(
                 alpha=alpha,
                 smooth_l1_beta=smooth_l1_beta,
                 lambda_shrink=lambda_shrink,
+                shrink_gamma=shrink_gamma,
+                edge_threshold=edge_threshold,
             ),
             {},
         )
@@ -338,6 +354,8 @@ def train_one_epoch(
     kendall=None,
     beta=5.0,
     lambda_shrink=0.0,
+    shrink_gamma=0.0,
+    edge_threshold=0.0,
 ):
     model.train()
     total_loss = 0.0
@@ -374,6 +392,8 @@ def train_one_epoch(
             kendall=kendall,
             beta=beta,
             lambda_shrink=lambda_shrink,
+            shrink_gamma=shrink_gamma,
+            edge_threshold=edge_threshold,
         )
 
         optimizer.zero_grad()
@@ -423,6 +443,8 @@ def validate(
     kendall=None,
     beta=5.0,
     lambda_shrink=0.0,
+    shrink_gamma=0.0,
+    edge_threshold=0.0,
 ):
     model.eval()
     total_loss = 0.0
@@ -458,6 +480,8 @@ def validate(
             kendall=kendall,
             beta=beta,
             lambda_shrink=lambda_shrink,
+            shrink_gamma=shrink_gamma,
+            edge_threshold=edge_threshold,
         )
 
         pred_mag = pred.F.norm(dim=-1)
@@ -611,6 +635,16 @@ def main():
         f"Train: {n_train} patches from {n_tc} clouds | "
         f"Val: {n_val} patches from {n_vc} clouds"
     )
+    if args.edge_threshold > 0:
+        # Log edge mask selectivity
+        import numpy as np
+
+        all_curv = np.concatenate(train_dataset.curvatures)
+        edge_pct = 100.0 * (all_curv > args.edge_threshold).mean()
+        logger.info(
+            f"Edge mask: {edge_pct:.1f}% of points above "
+            f"kappa={args.edge_threshold}"
+        )
 
     for epoch in range(start_epoch, args.epochs + 1):
         t0 = time.time()
@@ -631,6 +665,8 @@ def main():
             kendall=kendall,
             beta=beta,
             lambda_shrink=args.lambda_shrink,
+            shrink_gamma=args.shrink_gamma,
+            edge_threshold=args.edge_threshold,
         )
         v_stats = validate(
             model,
@@ -644,6 +680,8 @@ def main():
             kendall=kendall,
             beta=beta,
             lambda_shrink=args.lambda_shrink,
+            shrink_gamma=args.shrink_gamma,
+            edge_threshold=args.edge_threshold,
         )
         scheduler.step()
 
