@@ -16,7 +16,7 @@ import MinkowskiEngine as ME
 import numpy as np
 import torch
 from dataset import COORD_SCALE, compute_curvature
-from model import GatedSparseUNet, SparseUNet
+from model import GatedSparseUNet, SparseUNet, ThresholdGatedUNet
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,15 +63,18 @@ def main():
     ckpt = torch.load(args.checkpoint, map_location=device)
     model_args = ckpt["args"]
     max_disp = model_args.get("max_displacement", 5.0)
-    is_gated = model_args.get("model_type", "unet") == "gated"
+    model_type = model_args.get("model_type", "unet")
+    is_gated = model_type in ("gated", "threshold")
 
-    if is_gated:
+    if model_type == "gated":
         model = GatedSparseUNet(in_channels=4, max_displacement=max_disp).to(device)
+    elif model_type == "threshold":
+        model = ThresholdGatedUNet(in_channels=4, max_displacement=max_disp).to(device)
     else:
         model = SparseUNet(in_channels=4, max_displacement=max_disp).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
-    model_name = "gated" if is_gated else "unet"
+    model_name = model_type
     logger.info(f"Loaded {model_name} checkpoint from epoch {ckpt['epoch']}")
 
     # Forward pass on full cloud

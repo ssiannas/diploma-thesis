@@ -387,22 +387,22 @@ def gated_displacement_loss(
     lambda_gate: float = 1.0,
     gate_eps: float = 1e-3,
 ) -> tuple:
-    """Gated displacement loss with per-stratum normalization.
+    """Gated displacement loss: displacement on nonzero-GT only, gate on all.
 
-    L_disp: Huber on ALL points (not gated), normalized per stratum
-    (nonzero GT and zero GT separately, then averaged). This ensures
-    the 40% nonzero points get equal gradient weight to the 60% zero points.
+    L_disp: Huber on nonzero-GT points ONLY. Zero-GT points get no
+    displacement gradient -- the gate learns to suppress them instead.
+    This lets the displacement head learn full-magnitude corrections
+    without conflicting zero-point pressure.
 
-    L_gate: BCE supervising gate against indicator(||d_gt|| > gate_eps).
+    L_gate: BCE on ALL points against indicator(||d_gt|| > gate_eps).
 
     Returns (total_loss, extras_dict) for logging.
     """
     gt_mag = gt_displacement.norm(dim=-1)  # (N,)
     nonzero_mask = gt_mag > gate_eps  # (N,)
     n_nonzero = nonzero_mask.sum().clamp(min=1)
-    n_zero = (~nonzero_mask).sum().clamp(min=1)
 
-    # Per-point displacement error
+    # Displacement loss on nonzero-GT points only
     if smooth_l1_beta > 0:
         per_point = F.smooth_l1_loss(
             pred.F, gt_displacement, reduction="none", beta=smooth_l1_beta
@@ -412,14 +412,67 @@ def gated_displacement_loss(
     else:
         per_point = torch.abs(pred.F - gt_displacement).mean(dim=-1)
 
-    # Per-stratum normalization: each stratum contributes equally
-    loss_nonzero = per_point[nonzero_mask].sum() / n_nonzero
-    loss_zero = per_point[~nonzero_mask].sum() / n_zero
-    l_disp = 0.5 * (loss_nonzero + loss_zero)
+    l_disp = per_point[nonzero_mask].sum() / n_nonzero
 
     # Gate BCE loss
     gate_target = nonzero_mask.float()  # 1 = should move, 0 = should stay
     gate_pred = gate.F.squeeze(-1)  # (N,)
+    l_gate = F.binary_cross_entropy(gate_pred, gate_target)
+
+    total = l_disp + lambda_gate * l_gate
+
+    extras = {
+        "l_disp": l_disp.item(),
+        "l_gate": l_gate.item(),
+        "gate_mean": gate_pred.mean().item(),
+        "gate_nonzero_mean": (
+            gate_pred[nonzero_mask].mean().item() if nonzero_mask.any() else 0.0
+        ),
+        "gate_zero_mean": (
+            gate_pred[~nonzero_mask].mean().item() if (~nonzero_mask).any() else 0.0
+        ),
+    }
+    return total, extras
+
+
+def threshold_gated_loss(
+    pred: ME.SparseTensor,
+    gate: ME.SparseTensor,
+    gt_displacement: torch.Tensor,
+    smooth_l1_beta: float = 0.1,
+    lambda_gate: float = 1.0,
+    gate_eps: float = 1e-3,
+) -> tuple:
+    """Hurdle loss for threshold-gated displacement model.
+
+    L_disp: Huber on nonzero-GT points only (displacement head learns
+    full-magnitude corrections without zero-point pressure).
+
+    L_gate: BCE on the threshold-derived gate. Since the gate comes from
+    sigmoid(k * (||d_pred|| - theta)), this BCE gradient flows back through
+    both the displacement magnitude AND the threshold, teaching the network
+    to produce large displacements where GT is nonzero and keep them below
+    threshold where GT is zero. No MTL gradient conflict.
+
+    Returns (total_loss, extras_dict) for logging.
+    """
+    gt_mag = gt_displacement.norm(dim=-1)  # (N,)
+    nonzero_mask = gt_mag > gate_eps  # (N,)
+    n_nonzero = nonzero_mask.sum().clamp(min=1)
+
+    # Displacement loss on nonzero-GT points only
+    if smooth_l1_beta > 0:
+        per_point = F.smooth_l1_loss(
+            pred.F, gt_displacement, reduction="none", beta=smooth_l1_beta
+        ).mean(dim=-1)
+    else:
+        per_point = torch.abs(pred.F - gt_displacement).mean(dim=-1)
+
+    l_disp = per_point[nonzero_mask].sum() / n_nonzero
+
+    # Gate BCE loss -- teaches threshold and displacement magnitude jointly
+    gate_target = nonzero_mask.float()
+    gate_pred = gate.F.squeeze(-1).clamp(1e-6, 1 - 1e-6)  # (N,)
     l_gate = F.binary_cross_entropy(gate_pred, gate_target)
 
     total = l_disp + lambda_gate * l_gate

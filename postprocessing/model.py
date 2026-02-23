@@ -199,3 +199,83 @@ class GatedSparseUNet(SparseUNet):
         gate = self.sigmoid(self.conv_gate(d1))
 
         return disp, gate
+
+
+class ThresholdGatedUNet(SparseUNet):
+    """Sparse U-Net with learned magnitude thresholding.
+
+    Instead of a separate gate classification head (which suffers from
+    MTL gradient conflict with the displacement head), the gate derives
+    from the displacement prediction itself:
+
+        gate = sigmoid(k * (||d_pred|| - theta))
+
+    where theta is a per-point adaptive threshold predicted by a small MLP
+    on the decoder features, and k is a learnable sharpness parameter.
+    No separate classification loss needed -- the gate is fully determined
+    by the displacement magnitude, eliminating gradient conflict.
+    """
+
+    def __init__(self, in_channels: int = 4, max_displacement: float = 5.0):
+        super().__init__(in_channels=in_channels, max_displacement=max_displacement)
+        # Threshold head: predicts per-point threshold from decoder features
+        self.threshold_head = nn.Sequential(
+            ME.MinkowskiLinear(32, 16, bias=True),
+            ME.MinkowskiReLU(),
+            ME.MinkowskiLinear(16, 1, bias=True),
+        )
+        # Init final bias ~0.25 (median nonzero GT displacement magnitude)
+        # so gate starts near 50/50 rather than passing everything through
+        self.threshold_head[-1].linear.bias.data.fill_(0.25)
+        # Learnable sharpness (init ~10 for moderately sharp sigmoid)
+        self.log_k = nn.Parameter(torch.tensor(2.3))  # exp(2.3) ~ 10
+
+    def forward(self, x: ME.SparseTensor) -> tuple:
+        # Encoder (inherited layers)
+        e1 = MF.relu(self.bn_in(self.conv_in(x)))
+        e1 = self.enc_block1(e1)
+
+        e2 = MF.relu(self.bn_down1(self.down1(e1)))
+        e2 = self.enc_block2(e2)
+
+        e3 = MF.relu(self.bn_down2(self.down2(e2)))
+        e3 = self.enc_block3(e3)
+
+        # Bottleneck
+        b = self.bottleneck(e3)
+
+        # Decoder level 2
+        d2 = MF.relu(self.bn_up2(self.up2(b)))
+        d2 = ME.cat(d2, e2)
+        d2 = MF.relu(self.bn_merge2(self.dec_merge2(d2)))
+        d2 = self.dec_block2(d2)
+
+        # Decoder level 1
+        d1 = MF.relu(self.bn_up1(self.up1(d2)))
+        d1 = ME.cat(d1, e1)
+        d1 = MF.relu(self.bn_merge1(self.dec_merge1(d1)))
+        d1 = self.dec_block1(d1)
+
+        # Displacement head
+        disp = self.tanh(self.conv_out(d1))
+        disp = ME.SparseTensor(
+            features=disp.F * self.max_displacement,
+            coordinate_map_key=disp.coordinate_map_key,
+            coordinate_manager=disp.coordinate_manager,
+        )
+
+        # Threshold gate: sigmoid(k * (||disp|| - theta))
+        theta_sparse = self.threshold_head(d1)
+        theta = theta_sparse.F.squeeze(-1)  # (N,)
+        magnitude = disp.F.norm(dim=-1)  # (N,)
+        k = torch.exp(self.log_k)
+        gate_vals = torch.sigmoid(k * (magnitude - theta))  # (N,)
+
+        # Pack gate as SparseTensor for consistent interface
+        gate = ME.SparseTensor(
+            features=gate_vals.unsqueeze(-1),
+            coordinate_map_key=disp.coordinate_map_key,
+            coordinate_manager=disp.coordinate_manager,
+        )
+
+        return disp, gate

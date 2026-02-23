@@ -40,7 +40,7 @@ from losses import (
     stratified_displacement_loss,
     stratified_loss,
 )
-from model import GatedSparseUNet, SparseUNet
+from model import GatedSparseUNet, SparseUNet, ThresholdGatedUNet
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -108,8 +108,8 @@ def parse_args():
         "--model_type",
         type=str,
         default="unet",
-        choices=["unet", "gated"],
-        help="Model architecture (unet=SparseUNet, gated=GatedSparseUNet)",
+        choices=["unet", "gated", "threshold"],
+        help="Model architecture",
     )
     p.add_argument(
         "--loss_type",
@@ -122,6 +122,7 @@ def parse_args():
             "stratified",
             "stratified_disp",
             "gated",
+            "threshold_gated",
         ],
         help="Loss function type",
     )
@@ -303,7 +304,7 @@ def _compute_loss(
     Returns (loss, extras_dict) where extras_dict has per-component losses for logging.
     gt_disp is (N, 3) for K=1 or (N, K, 3) for K>1 (min-of-K).
     """
-    if loss_type == "gated":
+    if loss_type in ("gated", "threshold_gated"):
         return gated_displacement_loss(
             pred,
             gate,
@@ -393,7 +394,7 @@ def train_one_epoch(
     lambda_gate=1.0,
     mag_floor=0.1,
 ):
-    is_gated = loss_type == "gated"
+    is_gated = loss_type in ("gated", "threshold_gated")
     model.train()
     total_loss = 0.0
     n_batches = 0
@@ -493,7 +494,7 @@ def validate(
     lambda_gate=1.0,
     mag_floor=0.1,
 ):
-    is_gated = loss_type == "gated"
+    is_gated = loss_type in ("gated", "threshold_gated")
     model.eval()
     total_loss = 0.0
     n_batches = 0
@@ -614,6 +615,10 @@ def main():
     # Model
     if args.model_type == "gated":
         model = GatedSparseUNet(
+            in_channels=4, max_displacement=args.max_displacement
+        ).to(device)
+    elif args.model_type == "threshold":
+        model = ThresholdGatedUNet(
             in_channels=4, max_displacement=args.max_displacement
         ).to(device)
     else:
