@@ -3,10 +3,15 @@
 3-level encoder-decoder with skip connections. Input: 4-ch features per point
 (normalized xyz + curvature). Output: 3-ch displacement vector per point,
 bounded by tanh * max_displacement.
+
+GatedSparseUNet adds a learned move/no-move gate head (1-ch sigmoid) that
+modulates the displacement at inference. The gate is supervised with BCE
+against indicator(||d_gt|| > 0), explicitly modeling the bimodal GT distribution.
 """
 
 import MinkowskiEngine as ME
 import MinkowskiEngine.MinkowskiFunctional as MF
+import torch
 import torch.nn as nn
 
 
@@ -132,3 +137,65 @@ class SparseUNet(nn.Module):
         )
 
         return out
+
+
+class GatedSparseUNet(SparseUNet):
+    """Sparse U-Net with learned move/no-move gate.
+
+    Inherits encoder-decoder from SparseUNet. Replaces the single head with:
+    - Displacement head: 3-ch, tanh-bounded (same as SparseUNet)
+    - Gate head: 1-ch, sigmoid (move probability per point)
+
+    At inference: d_final = gate * d_pred.
+    During training: displacement loss is NOT gated (all points learn),
+    gate is supervised with BCE against indicator(||d_gt|| > 0).
+    """
+
+    def __init__(self, in_channels: int = 4, max_displacement: float = 5.0):
+        super().__init__(in_channels=in_channels, max_displacement=max_displacement)
+        # Replace parent's single head with two heads
+        # Displacement head (reuse parent's conv_out and tanh)
+        # Gate head
+        self.conv_gate = ME.MinkowskiConvolution(
+            32, 1, kernel_size=1, stride=1, bias=True, dimension=3
+        )
+        self.sigmoid = ME.MinkowskiSigmoid()
+
+    def forward(self, x: ME.SparseTensor) -> tuple:
+        # Encoder (inherited layers)
+        e1 = MF.relu(self.bn_in(self.conv_in(x)))
+        e1 = self.enc_block1(e1)
+
+        e2 = MF.relu(self.bn_down1(self.down1(e1)))
+        e2 = self.enc_block2(e2)
+
+        e3 = MF.relu(self.bn_down2(self.down2(e2)))
+        e3 = self.enc_block3(e3)
+
+        # Bottleneck
+        b = self.bottleneck(e3)
+
+        # Decoder level 2
+        d2 = MF.relu(self.bn_up2(self.up2(b)))
+        d2 = ME.cat(d2, e2)
+        d2 = MF.relu(self.bn_merge2(self.dec_merge2(d2)))
+        d2 = self.dec_block2(d2)
+
+        # Decoder level 1
+        d1 = MF.relu(self.bn_up1(self.up1(d2)))
+        d1 = ME.cat(d1, e1)
+        d1 = MF.relu(self.bn_merge1(self.dec_merge1(d1)))
+        d1 = self.dec_block1(d1)
+
+        # Displacement head
+        disp = self.tanh(self.conv_out(d1))
+        disp = ME.SparseTensor(
+            features=disp.F * self.max_displacement,
+            coordinate_map_key=disp.coordinate_map_key,
+            coordinate_manager=disp.coordinate_manager,
+        )
+
+        # Gate head
+        gate = self.sigmoid(self.conv_gate(d1))
+
+        return disp, gate

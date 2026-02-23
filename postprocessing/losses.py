@@ -379,6 +379,65 @@ def stratified_displacement_loss(
     return total, edge_loss.detach(), flat_loss.detach()
 
 
+def gated_displacement_loss(
+    pred: ME.SparseTensor,
+    gate: ME.SparseTensor,
+    gt_displacement: torch.Tensor,
+    smooth_l1_beta: float = 0.1,
+    lambda_gate: float = 1.0,
+    gate_eps: float = 1e-3,
+) -> tuple:
+    """Gated displacement loss with per-stratum normalization.
+
+    L_disp: Huber on ALL points (not gated), normalized per stratum
+    (nonzero GT and zero GT separately, then averaged). This ensures
+    the 40% nonzero points get equal gradient weight to the 60% zero points.
+
+    L_gate: BCE supervising gate against indicator(||d_gt|| > gate_eps).
+
+    Returns (total_loss, extras_dict) for logging.
+    """
+    gt_mag = gt_displacement.norm(dim=-1)  # (N,)
+    nonzero_mask = gt_mag > gate_eps  # (N,)
+    n_nonzero = nonzero_mask.sum().clamp(min=1)
+    n_zero = (~nonzero_mask).sum().clamp(min=1)
+
+    # Per-point displacement error
+    if smooth_l1_beta > 0:
+        per_point = F.smooth_l1_loss(
+            pred.F, gt_displacement, reduction="none", beta=smooth_l1_beta
+        ).mean(
+            dim=-1
+        )  # (N,) mean over xyz
+    else:
+        per_point = torch.abs(pred.F - gt_displacement).mean(dim=-1)
+
+    # Per-stratum normalization: each stratum contributes equally
+    loss_nonzero = per_point[nonzero_mask].sum() / n_nonzero
+    loss_zero = per_point[~nonzero_mask].sum() / n_zero
+    l_disp = 0.5 * (loss_nonzero + loss_zero)
+
+    # Gate BCE loss
+    gate_target = nonzero_mask.float()  # 1 = should move, 0 = should stay
+    gate_pred = gate.F.squeeze(-1)  # (N,)
+    l_gate = F.binary_cross_entropy(gate_pred, gate_target)
+
+    total = l_disp + lambda_gate * l_gate
+
+    extras = {
+        "l_disp": l_disp.item(),
+        "l_gate": l_gate.item(),
+        "gate_mean": gate_pred.mean().item(),
+        "gate_nonzero_mean": (
+            gate_pred[nonzero_mask].mean().item() if nonzero_mask.any() else 0.0
+        ),
+        "gate_zero_mean": (
+            gate_pred[~nonzero_mask].mean().item() if (~nonzero_mask).any() else 0.0
+        ),
+    }
+    return total, extras
+
+
 def chamfer_loss(
     pred: ME.SparseTensor,
     input_sparse: ME.SparseTensor,

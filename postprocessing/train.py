@@ -34,12 +34,13 @@ from losses import (
     KendallUncertaintyWeights,
     chamfer_loss,
     curvature_weighted_l1_loss,
+    gated_displacement_loss,
     laplacian_loss,
     min_of_k_displacement_loss,
     stratified_displacement_loss,
     stratified_loss,
 )
-from model import SparseUNet
+from model import GatedSparseUNet, SparseUNet
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -104,6 +105,13 @@ def parse_args():
         "--no_augment", action="store_true", help="Disable data augmentation"
     )
     p.add_argument(
+        "--model_type",
+        type=str,
+        default="unet",
+        choices=["unet", "gated"],
+        help="Model architecture (unet=SparseUNet, gated=GatedSparseUNet)",
+    )
+    p.add_argument(
         "--loss_type",
         type=str,
         default="displacement",
@@ -113,8 +121,21 @@ def parse_args():
             "laplacian",
             "stratified",
             "stratified_disp",
+            "gated",
         ],
         help="Loss function type",
+    )
+    p.add_argument(
+        "--lambda_gate",
+        type=float,
+        default=1.0,
+        help="Weight for gate BCE loss in gated mode",
+    )
+    p.add_argument(
+        "--mag_floor",
+        type=float,
+        default=0.1,
+        help="Magnitude weight floor for zero-GT points (0=nonzero only)",
     )
     p.add_argument(
         "--chamfer_weight",
@@ -273,12 +294,24 @@ def _compute_loss(
     lambda_shrink=0.0,
     shrink_gamma=0.0,
     edge_threshold=0.0,
+    gate=None,
+    lambda_gate=1.0,
+    mag_floor=0.1,
 ):
     """Dispatch to the appropriate loss function.
 
     Returns (loss, extras_dict) where extras_dict has per-component losses for logging.
     gt_disp is (N, 3) for K=1 or (N, K, 3) for K>1 (min-of-K).
     """
+    if loss_type == "gated":
+        return gated_displacement_loss(
+            pred,
+            gate,
+            gt_disp,
+            smooth_l1_beta=smooth_l1_beta,
+            lambda_gate=lambda_gate,
+        )
+
     # Min-of-K: gt_disp has shape (N, K, 3) with K > 1
     if gt_disp.ndim == 3 and gt_disp.shape[1] > 1:
         return (
@@ -331,6 +364,7 @@ def _compute_loss(
                 gt_disp,
                 curv,
                 alpha=alpha,
+                mag_floor=mag_floor,
                 smooth_l1_beta=smooth_l1_beta,
                 lambda_shrink=lambda_shrink,
                 shrink_gamma=shrink_gamma,
@@ -356,7 +390,10 @@ def train_one_epoch(
     lambda_shrink=0.0,
     shrink_gamma=0.0,
     edge_threshold=0.0,
+    lambda_gate=1.0,
+    mag_floor=0.1,
 ):
+    is_gated = loss_type == "gated"
     model.train()
     total_loss = 0.0
     n_batches = 0
@@ -378,7 +415,12 @@ def train_one_epoch(
         gt_disp = displacements.float().to(device)
         curv = curvature.float().to(device)
 
-        pred = model(sin)
+        output = model(sin)
+        if is_gated:
+            pred, gate = output
+        else:
+            pred, gate = output, None
+
         loss, extras = _compute_loss(
             pred,
             sin,
@@ -394,6 +436,9 @@ def train_one_epoch(
             lambda_shrink=lambda_shrink,
             shrink_gamma=shrink_gamma,
             edge_threshold=edge_threshold,
+            gate=gate,
+            lambda_gate=lambda_gate,
+            mag_floor=mag_floor,
         )
 
         optimizer.zero_grad()
@@ -445,7 +490,10 @@ def validate(
     lambda_shrink=0.0,
     shrink_gamma=0.0,
     edge_threshold=0.0,
+    lambda_gate=1.0,
+    mag_floor=0.1,
 ):
+    is_gated = loss_type == "gated"
     model.eval()
     total_loss = 0.0
     n_batches = 0
@@ -466,7 +514,12 @@ def validate(
         gt_disp = displacements.float().to(device)
         curv = curvature.float().to(device)
 
-        pred = model(sin)
+        output = model(sin)
+        if is_gated:
+            pred, gate = output
+        else:
+            pred, gate = output, None
+
         loss, extras = _compute_loss(
             pred,
             sin,
@@ -482,6 +535,9 @@ def validate(
             lambda_shrink=lambda_shrink,
             shrink_gamma=shrink_gamma,
             edge_threshold=edge_threshold,
+            gate=gate,
+            lambda_gate=lambda_gate,
+            mag_floor=mag_floor,
         )
 
         pred_mag = pred.F.norm(dim=-1)
@@ -556,9 +612,16 @@ def main():
     )
 
     # Model
-    model = SparseUNet(in_channels=4, max_displacement=args.max_displacement).to(device)
+    if args.model_type == "gated":
+        model = GatedSparseUNet(
+            in_channels=4, max_displacement=args.max_displacement
+        ).to(device)
+    else:
+        model = SparseUNet(in_channels=4, max_displacement=args.max_displacement).to(
+            device
+        )
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"Model parameters: {n_params:,}")
+    logger.info(f"Model: {args.model_type} | Parameters: {n_params:,}")
 
     # Kendall uncertainty weights for stratified loss
     kendall = None
@@ -667,6 +730,8 @@ def main():
             lambda_shrink=args.lambda_shrink,
             shrink_gamma=args.shrink_gamma,
             edge_threshold=args.edge_threshold,
+            lambda_gate=args.lambda_gate,
+            mag_floor=args.mag_floor,
         )
         v_stats = validate(
             model,
@@ -682,6 +747,8 @@ def main():
             lambda_shrink=args.lambda_shrink,
             shrink_gamma=args.shrink_gamma,
             edge_threshold=args.edge_threshold,
+            lambda_gate=args.lambda_gate,
+            mag_floor=args.mag_floor,
         )
         scheduler.step()
 
@@ -715,6 +782,19 @@ def main():
                 f"v={v.get('flat_loss', 0):.4f} | "
                 f"beta={beta:.1f} | "
                 f"kw=[{kw[0]:.3f}, {kw[1]:.3f}]"
+            )
+        # Gated loss diagnostics
+        if "l_gate" in t:
+            logger.info(
+                f"  l_disp: t={t['l_disp']:.4f} v={v.get('l_disp', 0):.4f} | "
+                f"l_gate: t={t['l_gate']:.4f} v={v.get('l_gate', 0):.4f}"
+            )
+            logger.info(
+                f"  gate: t={t['gate_mean']:.3f} v={v.get('gate_mean', 0):.3f} | "
+                f"gate_nz: t={t['gate_nonzero_mean']:.3f} "
+                f"v={v.get('gate_nonzero_mean', 0):.3f} | "
+                f"gate_z: t={t['gate_zero_mean']:.3f} "
+                f"v={v.get('gate_zero_mean', 0):.3f}"
             )
 
         # Save best model

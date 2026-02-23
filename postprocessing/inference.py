@@ -16,7 +16,7 @@ import MinkowskiEngine as ME
 import numpy as np
 import torch
 from dataset import COORD_SCALE, compute_curvature
-from model import SparseUNet
+from model import GatedSparseUNet, SparseUNet
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,13 +62,17 @@ def main():
     # Load model
     ckpt = torch.load(args.checkpoint, map_location=device)
     model_args = ckpt["args"]
-    model = SparseUNet(
-        in_channels=4,
-        max_displacement=model_args.get("max_displacement", 5.0),
-    ).to(device)
+    max_disp = model_args.get("max_displacement", 5.0)
+    is_gated = model_args.get("model_type", "unet") == "gated"
+
+    if is_gated:
+        model = GatedSparseUNet(in_channels=4, max_displacement=max_disp).to(device)
+    else:
+        model = SparseUNet(in_channels=4, max_displacement=max_disp).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
-    logger.info(f"Loaded checkpoint from epoch {ckpt['epoch']}")
+    model_name = "gated" if is_gated else "unet"
+    logger.info(f"Loaded {model_name} checkpoint from epoch {ckpt['epoch']}")
 
     # Forward pass on full cloud
     sin = ME.SparseTensor(
@@ -79,8 +83,18 @@ def main():
         device=device,
     )
 
-    pred = model(sin)
-    displacement = pred.F.cpu().numpy()
+    output = model(sin)
+    if is_gated:
+        pred, gate = output
+        gate_vals = gate.F.squeeze(-1).cpu().numpy()
+        displacement = pred.F.cpu().numpy() * gate_vals[:, np.newaxis]
+        logger.info(
+            f"Gate stats: mean={gate_vals.mean():.3f}, "
+            f">0.5={100*(gate_vals > 0.5).mean():.1f}%"
+        )
+    else:
+        pred = output
+        displacement = pred.F.cpu().numpy()
 
     # Apply displacement
     refined = decoded + displacement
