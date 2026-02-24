@@ -540,3 +540,52 @@ def chamfer_loss(
         bwd_min = dists.min(dim=0).values
         total_loss = total_loss + (w_b * fwd_min).mean() + (w_b * bwd_min).mean()
     return total_loss / max(n_patches, 1)
+
+
+def dynamic_chamfer_loss(
+    pred: ME.SparseTensor,
+    original_patches: list,
+) -> tuple:
+    """Chamfer distance between refined points and actual original cloud crops.
+
+    No precomputed displacement targets. NN re-matched every forward pass.
+    Uses squared distances (standard in PU-Net, Dis-PU).
+
+    Args:
+        pred: SparseTensor with predicted offsets as features (N_total, 3)
+        original_patches: list of (M_i, 3) float tensors, one per batch element
+
+    Returns:
+        (loss, extras_dict) for consistency with other loss functions.
+    """
+    batch_idx = pred.C[:, 0]
+    decoded = pred.C[:, 1:].float()  # integer voxel coords
+    offsets = pred.F  # predicted displacement
+    refined = decoded + offsets
+
+    unique_batches = batch_idx.unique()
+    n_patches = len(unique_batches)
+
+    total_fwd = 0.0
+    total_rev = 0.0
+
+    for i, b in enumerate(unique_batches):
+        mask = batch_idx == b
+        refined_b = refined[mask]  # (N_b, 3)
+        orig_b = original_patches[i].to(refined_b.device)  # (M_b, 3)
+
+        if orig_b.shape[0] == 0:
+            continue
+
+        dists_sq = torch.cdist(refined_b, orig_b).pow(2)  # (N_b, M_b)
+        fwd = dists_sq.min(dim=1).values.mean()  # each refined -> nearest orig
+        rev = dists_sq.min(dim=0).values.mean()  # each orig -> nearest refined
+        total_fwd += fwd
+        total_rev += rev
+
+    loss = (total_fwd + total_rev) / max(n_patches, 1)
+    extras = {
+        "cd_fwd": float(total_fwd) / max(n_patches, 1) if n_patches > 0 else 0,
+        "cd_rev": float(total_rev) / max(n_patches, 1) if n_patches > 0 else 0,
+    }
+    return loss, extras

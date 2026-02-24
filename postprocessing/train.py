@@ -34,6 +34,7 @@ from losses import (
     KendallUncertaintyWeights,
     chamfer_loss,
     curvature_weighted_l1_loss,
+    dynamic_chamfer_loss,
     gated_displacement_loss,
     laplacian_loss,
     min_of_k_displacement_loss,
@@ -123,6 +124,7 @@ def parse_args():
             "stratified_disp",
             "gated",
             "threshold_gated",
+            "cd",
         ],
         help="Loss function type",
     )
@@ -192,6 +194,12 @@ def parse_args():
         default=None,
         help="Path to checkpoint to resume from (loads model + optimizer state)",
     )
+    p.add_argument(
+        "--chamfer_padding",
+        type=int,
+        default=10,
+        help="Padding (voxels) around patch bbox when cropping originals for CD loss",
+    )
     return p.parse_args()
 
 
@@ -205,6 +213,8 @@ def _use_multi_frame(args) -> bool:
 
 def _build_datasets(args):
     """Build train/val datasets, choosing legacy or multi-frame mode."""
+    use_chamfer = args.loss_type == "cd"
+
     if _use_multi_frame(args):
         rates = args.rates or ["r2", "r3", "r4"]
         rate_label = "_".join(rates)
@@ -215,6 +225,8 @@ def _build_datasets(args):
         logger.info(f"Multi-frame mode: rates={rates}")
         logger.info(f"Train sequences: {train_seqs}")
         logger.info(f"Val sequence: {val_seqs}")
+        if use_chamfer:
+            logger.info(f"Chamfer mode: padding={args.chamfer_padding}")
 
         logger.info("Loading training data...")
         train_ds = MultiFrameDataset(
@@ -229,6 +241,8 @@ def _build_datasets(args):
             augment=not args.no_augment,
             frame_stride=args.frame_stride,
             displacement_k=args.displacement_k,
+            use_chamfer=use_chamfer,
+            chamfer_padding=args.chamfer_padding,
         )
         logger.info("Loading validation data...")
         val_ds = MultiFrameDataset(
@@ -243,8 +257,13 @@ def _build_datasets(args):
             augment=False,
             frame_stride=args.frame_stride,
             displacement_k=args.displacement_k,
+            use_chamfer=use_chamfer,
+            chamfer_padding=args.chamfer_padding,
         )
-        collate_fn = MultiFrameDataset.collate_fn
+        if use_chamfer:
+            collate_fn = MultiFrameDataset.collate_fn_chamfer
+        else:
+            collate_fn = MultiFrameDataset.collate_fn
         return train_ds, val_ds, collate_fn, rate_label
 
     # Legacy single-rate mode
@@ -393,6 +412,7 @@ def train_one_epoch(
     edge_threshold=0.0,
     lambda_gate=1.0,
     mag_floor=0.1,
+    use_chamfer=False,
 ):
     is_gated = loss_type in ("gated", "threshold_gated")
     model.train()
@@ -405,16 +425,13 @@ def train_one_epoch(
     total_grad_norm = 0.0
     total_extras = {}
 
-    for coords, feats, displacements, curvature in tqdm(
-        loader, desc="Train", leave=False
-    ):
+    for batch in tqdm(loader, desc="Train", leave=False):
+        coords, feats = batch[0], batch[1]
         sin = ME.SparseTensor(
             features=feats.float(),
             coordinates=coords.int(),
             device=device,
         )
-        gt_disp = displacements.float().to(device)
-        curv = curvature.float().to(device)
 
         output = model(sin)
         if is_gated:
@@ -422,25 +439,31 @@ def train_one_epoch(
         else:
             pred, gate = output, None
 
-        loss, extras = _compute_loss(
-            pred,
-            sin,
-            gt_disp,
-            curv,
-            loss_type,
-            alpha,
-            smooth_l1_beta,
-            chamfer_weight,
-            laplacian_k,
-            kendall=kendall,
-            beta=beta,
-            lambda_shrink=lambda_shrink,
-            shrink_gamma=shrink_gamma,
-            edge_threshold=edge_threshold,
-            gate=gate,
-            lambda_gate=lambda_gate,
-            mag_floor=mag_floor,
-        )
+        if use_chamfer:
+            orig_patches = batch[2]  # list of tensors, variable size
+            loss, extras = dynamic_chamfer_loss(pred, orig_patches)
+        else:
+            gt_disp = batch[2].float().to(device)
+            curv = batch[3].float().to(device)
+            loss, extras = _compute_loss(
+                pred,
+                sin,
+                gt_disp,
+                curv,
+                loss_type,
+                alpha,
+                smooth_l1_beta,
+                chamfer_weight,
+                laplacian_k,
+                kendall=kendall,
+                beta=beta,
+                lambda_shrink=lambda_shrink,
+                shrink_gamma=shrink_gamma,
+                edge_threshold=edge_threshold,
+                gate=gate,
+                lambda_gate=lambda_gate,
+                mag_floor=mag_floor,
+            )
 
         optimizer.zero_grad()
         loss.backward()
@@ -450,13 +473,14 @@ def train_one_epoch(
         # Diagnostics
         with torch.no_grad():
             pred_mag = pred.F.norm(dim=-1)
-            gt_mag = gt_disp.norm(dim=-1)
             n_pts = pred_mag.shape[0]
             total_pred_abs += pred_mag.sum().item()
-            total_gt_abs += gt_mag.sum().item()
             total_near_zero += (pred_mag < 0.01).sum().item()
             total_points += n_pts
             total_grad_norm += grad_norm.item()
+            if not use_chamfer:
+                gt_mag = batch[2].float().to(device).norm(dim=-1)
+                total_gt_abs += gt_mag.sum().item()
 
         total_loss += loss.item()
         for k_extra, v in extras.items():
@@ -467,10 +491,11 @@ def train_one_epoch(
     stats = {
         "loss": total_loss / n,
         "pred_mean_abs": total_pred_abs / max(total_points, 1),
-        "gt_mean_abs": total_gt_abs / max(total_points, 1),
         "pred_near_zero_pct": 100.0 * total_near_zero / max(total_points, 1),
         "grad_norm": total_grad_norm / n,
     }
+    if not use_chamfer:
+        stats["gt_mean_abs"] = total_gt_abs / max(total_points, 1)
     for k_extra, v in total_extras.items():
         stats[k_extra] = v / n
     return stats
@@ -493,6 +518,7 @@ def validate(
     edge_threshold=0.0,
     lambda_gate=1.0,
     mag_floor=0.1,
+    use_chamfer=False,
 ):
     is_gated = loss_type in ("gated", "threshold_gated")
     model.eval()
@@ -504,16 +530,13 @@ def validate(
     total_points = 0
     total_extras = {}
 
-    for coords, feats, displacements, curvature in tqdm(
-        loader, desc="Val", leave=False
-    ):
+    for batch in tqdm(loader, desc="Val", leave=False):
+        coords, feats = batch[0], batch[1]
         sin = ME.SparseTensor(
             features=feats.float(),
             coordinates=coords.int(),
             device=device,
         )
-        gt_disp = displacements.float().to(device)
-        curv = curvature.float().to(device)
 
         output = model(sin)
         if is_gated:
@@ -521,33 +544,40 @@ def validate(
         else:
             pred, gate = output, None
 
-        loss, extras = _compute_loss(
-            pred,
-            sin,
-            gt_disp,
-            curv,
-            loss_type,
-            alpha,
-            smooth_l1_beta,
-            chamfer_weight,
-            laplacian_k,
-            kendall=kendall,
-            beta=beta,
-            lambda_shrink=lambda_shrink,
-            shrink_gamma=shrink_gamma,
-            edge_threshold=edge_threshold,
-            gate=gate,
-            lambda_gate=lambda_gate,
-            mag_floor=mag_floor,
-        )
+        if use_chamfer:
+            orig_patches = batch[2]
+            loss, extras = dynamic_chamfer_loss(pred, orig_patches)
+        else:
+            gt_disp = batch[2].float().to(device)
+            curv = batch[3].float().to(device)
+            loss, extras = _compute_loss(
+                pred,
+                sin,
+                gt_disp,
+                curv,
+                loss_type,
+                alpha,
+                smooth_l1_beta,
+                chamfer_weight,
+                laplacian_k,
+                kendall=kendall,
+                beta=beta,
+                lambda_shrink=lambda_shrink,
+                shrink_gamma=shrink_gamma,
+                edge_threshold=edge_threshold,
+                gate=gate,
+                lambda_gate=lambda_gate,
+                mag_floor=mag_floor,
+            )
 
         pred_mag = pred.F.norm(dim=-1)
-        gt_mag = gt_disp.norm(dim=-1)
         n_pts = pred_mag.shape[0]
         total_pred_abs += pred_mag.sum().item()
-        total_gt_abs += gt_mag.sum().item()
         total_near_zero += (pred_mag < 0.01).sum().item()
         total_points += n_pts
+        if not use_chamfer:
+            gt_mag = batch[2].float().to(device).norm(dim=-1)
+            total_gt_abs += gt_mag.sum().item()
 
         total_loss += loss.item()
         for k_extra, v in extras.items():
@@ -558,9 +588,10 @@ def validate(
     stats = {
         "loss": total_loss / n,
         "pred_mean_abs": total_pred_abs / max(total_points, 1),
-        "gt_mean_abs": total_gt_abs / max(total_points, 1),
         "pred_near_zero_pct": 100.0 * total_near_zero / max(total_points, 1),
     }
+    if not use_chamfer:
+        stats["gt_mean_abs"] = total_gt_abs / max(total_points, 1)
     for k_extra, v in total_extras.items():
         stats[k_extra] = v / n
     return stats
@@ -720,6 +751,8 @@ def main():
         # Beta annealing for stratified loss: 1 -> 10 over training
         beta = 1.0 + 9.0 * (epoch - 1) / max(args.epochs - 1, 1)
 
+        use_chamfer = args.loss_type == "cd"
+
         t_stats = train_one_epoch(
             model,
             train_loader,
@@ -737,6 +770,7 @@ def main():
             edge_threshold=args.edge_threshold,
             lambda_gate=args.lambda_gate,
             mag_floor=args.mag_floor,
+            use_chamfer=use_chamfer,
         )
         v_stats = validate(
             model,
@@ -754,6 +788,7 @@ def main():
             edge_threshold=args.edge_threshold,
             lambda_gate=args.lambda_gate,
             mag_floor=args.mag_floor,
+            use_chamfer=use_chamfer,
         )
         scheduler.step()
 
@@ -766,12 +801,22 @@ def main():
             f"lr={lr:.1e} | {elapsed:.1f}s"
         )
         t, v = t_stats, v_stats
-        logger.info(
-            f"  pred_abs: train={t['pred_mean_abs']:.4f} "
-            f"val={v['pred_mean_abs']:.4f} | "
-            f"gt_abs: train={t['gt_mean_abs']:.4f} "
-            f"val={v['gt_mean_abs']:.4f}"
-        )
+        if use_chamfer:
+            logger.info(
+                f"  pred_abs: train={t['pred_mean_abs']:.4f} "
+                f"val={v['pred_mean_abs']:.4f} | "
+                f"cd_fwd: train={t.get('cd_fwd', 0):.4f} "
+                f"val={v.get('cd_fwd', 0):.4f} | "
+                f"cd_rev: train={t.get('cd_rev', 0):.4f} "
+                f"val={v.get('cd_rev', 0):.4f}"
+            )
+        else:
+            logger.info(
+                f"  pred_abs: train={t['pred_mean_abs']:.4f} "
+                f"val={v['pred_mean_abs']:.4f} | "
+                f"gt_abs: train={t['gt_mean_abs']:.4f} "
+                f"val={v['gt_mean_abs']:.4f}"
+            )
         logger.info(
             f"  near_zero%%: train={t['pred_near_zero_pct']:.1f} "
             f"val={v['pred_near_zero_pct']:.1f} | "

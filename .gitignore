@@ -16,6 +16,8 @@ dist/
 # Claude Code files (tracked)
 .claude/
 CLAUDE*
+**claude**
+**chatgpt**
 
 # Development docs (local tracking only)
 .docs/

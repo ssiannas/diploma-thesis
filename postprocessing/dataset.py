@@ -226,14 +226,19 @@ class MultiFrameDataset(Dataset):
         augment: bool = False,
         frame_stride: int = 1,
         displacement_k: int = 1,
+        use_chamfer: bool = False,
+        chamfer_padding: int = 10,
     ):
         self.data_root = Path(data_root)
         self.patch_size = patch_size
         self.augment = augment
         self.displacement_k = displacement_k
+        self.use_chamfer = use_chamfer
+        self.chamfer_padding = chamfer_padding
         self.patches: List[Tuple[int, np.ndarray]] = []
 
         self.decoded_clouds: List[np.ndarray] = []
+        self.original_clouds: List[np.ndarray] = []  # only populated when use_chamfer
         self.displacements: List[np.ndarray] = []  # (N, 3) if K=1, (N, K, 3) if K>1
         self.curvatures: List[np.ndarray] = []
 
@@ -281,55 +286,66 @@ class MultiFrameDataset(Dataset):
 
             decoded = np.load(decoded_path).astype(np.float32)
 
-            # Try precomputed displacement and curvature
-            curv_path = frame_dir / f"curvature_{rate}.npy"
-            if displacement_k > 1:
-                disp_path = frame_dir / f"displacement_k{displacement_k}_{rate}.npy"
-            else:
-                disp_path = frame_dir / f"displacement_{rate}.npy"
-
-            if disp_path.exists() and curv_path.exists():
-                displacement = np.load(disp_path)
-                curvature = np.load(curv_path)
-            else:
-                # Fallback: compute inline
-                cache_key = (seq, frame)
-                if cache_key not in original_cache:
-                    original_path = frame_dir / "original.npy"
+            # Load original cloud (needed for chamfer mode or inline displacement)
+            cache_key = (seq, frame)
+            if cache_key not in original_cache:
+                original_path = frame_dir / "original.npy"
+                if original_path.exists():
                     original_cache[cache_key] = np.load(original_path).astype(
                         np.float32
                     )
-                original = original_cache[cache_key]
 
-                tree = cKDTree(original)
+            # Curvature
+            curv_path = frame_dir / f"curvature_{rate}.npy"
+            if curv_path.exists():
+                curvature = np.load(curv_path)
+            else:
+                curvature = compute_curvature(decoded, k=curvature_k)
+
+            if use_chamfer:
+                # No displacement needed -- store dummy, original stored separately
+                displacement = np.zeros((len(decoded), 3), dtype=np.float32)
+            else:
+                # Precomputed or inline displacement
                 if displacement_k > 1:
-                    _, nn_idx = tree.query(decoded, k=displacement_k)  # (N, K)
-                    displacement = (
-                        original[nn_idx] - decoded[:, np.newaxis, :]
-                    ).astype(
-                        np.float32
-                    )  # (N, K, 3)
+                    disp_path = frame_dir / f"displacement_k{displacement_k}_{rate}.npy"
                 else:
-                    _, nn_idx = tree.query(decoded)
-                    displacement = (original[nn_idx] - decoded).astype(np.float32)
+                    disp_path = frame_dir / f"displacement_{rate}.npy"
 
-                # Load precomputed curvature if available
-                if curv_path.exists():
-                    curvature = np.load(curv_path)
+                if disp_path.exists():
+                    displacement = np.load(disp_path)
+                elif cache_key in original_cache:
+                    original = original_cache[cache_key]
+                    tree = cKDTree(original)
+                    if displacement_k > 1:
+                        _, nn_idx = tree.query(decoded, k=displacement_k)
+                        displacement = (
+                            original[nn_idx] - decoded[:, np.newaxis, :]
+                        ).astype(np.float32)
+                    else:
+                        _, nn_idx = tree.query(decoded)
+                        displacement = (original[nn_idx] - decoded).astype(np.float32)
                 else:
-                    curvature = compute_curvature(decoded, k=curvature_k)
+                    logger.warning(f"No displacement source for {frame_dir}")
+                    continue
 
             cloud_idx = len(self.decoded_clouds)
             self.decoded_clouds.append(decoded)
             self.displacements.append(displacement)
             self.curvatures.append(curvature)
 
+            if use_chamfer and cache_key in original_cache:
+                self.original_clouds.append(original_cache[cache_key])
+            elif use_chamfer:
+                logger.warning(f"No original for chamfer: {frame_dir}")
+                continue
+
             # Extract patches
             cloud_patches = extract_patches(decoded, patch_size, stride, min_points)
             for patch_indices in cloud_patches:
                 self.patches.append((cloud_idx, patch_indices))
 
-        # Clear original cache to free memory
+        # Clear original cache to free memory (keep originals in self if chamfer)
         original_cache.clear()
 
         logger.info(
@@ -347,6 +363,16 @@ class MultiFrameDataset(Dataset):
         curvature = self.curvatures[cloud_idx][point_indices]
         displacement = self.displacements[cloud_idx][point_indices].copy()
 
+        # Crop original points BEFORE augmentation (coords are in original space)
+        orig_crop = None
+        if self.use_chamfer:
+            orig_cloud = self.original_clouds[cloud_idx]
+            pad = self.chamfer_padding
+            mins = coords.min(axis=0) - pad
+            maxs = coords.max(axis=0) + pad
+            mask = np.all((orig_cloud >= mins) & (orig_cloud <= maxs), axis=1)
+            orig_crop = orig_cloud[mask].astype(np.float32)
+
         # Random rigid augmentation: axis permutation + sign flips
         if self.augment:
             axes = np.random.permutation(3)
@@ -356,6 +382,8 @@ class MultiFrameDataset(Dataset):
                 displacement = displacement[:, :, axes] * signs
             else:  # (N, 3)
                 displacement = displacement[:, axes] * signs
+            if orig_crop is not None:
+                orig_crop = orig_crop[:, axes] * signs
 
         features = np.column_stack(
             [
@@ -365,6 +393,9 @@ class MultiFrameDataset(Dataset):
         ).astype(np.float32)
 
         coords_int = np.floor(coords).astype(np.int32)
+
+        if self.use_chamfer:
+            return coords_int, features, orig_crop, curvature
 
         return coords_int, features, displacement, curvature
 
@@ -381,3 +412,18 @@ class MultiFrameDataset(Dataset):
         curv_batch = torch.from_numpy(np.concatenate(curv_list, axis=0))
 
         return coords_batch, feats_batch, disp_batch, curv_batch
+
+    @staticmethod
+    def collate_fn_chamfer(batch):
+        """Collate for chamfer mode: orig_coords kept as list (variable size)."""
+        coords_list, feats_list, orig_list, curv_list = zip(*batch)
+
+        coords_batch, feats_batch = ME.utils.sparse_collate(
+            [torch.from_numpy(c) for c in coords_list],
+            [torch.from_numpy(f) for f in feats_list],
+        )
+        # orig_coords are variable size -- keep as list of tensors
+        orig_batch = [torch.from_numpy(o) for o in orig_list]
+        curv_batch = torch.from_numpy(np.concatenate(curv_list, axis=0))
+
+        return coords_batch, feats_batch, orig_batch, curv_batch
