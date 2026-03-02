@@ -141,11 +141,12 @@ class TestMultiFrameDataset:
             min_points=5,
         )
         assert len(ds) > 0
-        coords, feats, disp, curv = ds[0]
+        coords, feats, disp, curv, rate_index = ds[0]
         assert coords.ndim == 2 and coords.shape[1] == 3
         assert feats.shape[1] == 4
         assert disp.shape[1] == 3
         assert curv.ndim == 1
+        assert isinstance(rate_index, float)
 
     def test_precomputed_loading(self, tmp_path):
         """Dataset loads precomputed .npy files when available."""
@@ -196,8 +197,9 @@ class TestMultiFrameDataset:
         assert len(ds) == len(ds.patches)
 
         for i in range(min(3, len(ds))):
-            coords, feats, disp, curv = ds[i]
+            coords, feats, disp, curv, rate_index = ds[i]
             n = coords.shape[0]
             assert feats.shape == (n, 4)
             assert disp.shape == (n, 3)
             assert curv.shape == (n,)
+            assert isinstance(rate_index, float)

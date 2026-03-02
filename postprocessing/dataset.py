@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from scipy.spatial import cKDTree
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
 try:
@@ -30,6 +30,17 @@ SEQUENCES = [
 ]
 
 COORD_SCALE = 1023.0  # 10-bit voxel grid
+
+# BPP values from PCGCv2 checkpoint names (bits per point)
+RATE_BPP = {
+    "r1": 0.025,
+    "r2": 0.05,
+    "r3": 0.10,
+    "r4": 0.15,
+    "r5": 0.25,
+    "r6": 0.30,
+    "r7": 0.40,
+}
 
 
 def compute_curvature(points: np.ndarray, k: int = 30) -> np.ndarray:
@@ -97,109 +108,6 @@ def extract_patches(
     return patches
 
 
-class PatchPairDataset(Dataset):
-    """Dataset of (decoded patch, displacement target) pairs.
-
-    For each decoded point, the displacement target is:
-        original[nn_idx] - decoded  (where nn_idx is NN in original cloud)
-
-    Features per point: (x/1023, y/1023, z/1023, curvature)
-    """
-
-    def __init__(
-        self,
-        data_root: str,
-        sequences: List[str],
-        rate: str = "r7",
-        patch_size: int = 64,
-        stride: int = 32,
-        min_points: int = 100,
-        curvature_k: int = 30,
-        augment: bool = False,
-    ):
-        self.data_root = Path(data_root)
-        self.rate = rate
-        self.patch_size = patch_size
-        self.augment = augment
-        self.patches: List[Tuple[int, np.ndarray]] = []  # (cloud_idx, indices)
-
-        self.decoded_clouds = []
-        self.displacements = []
-        self.curvatures = []
-
-        for seq in sequences:
-            seq_dir = self.data_root / seq
-            original = np.load(seq_dir / "original.npy").astype(np.float32)
-            decoded = np.load(seq_dir / f"pcgcv2_{rate}.npy").astype(np.float32)
-
-            # NN displacement target
-            tree = cKDTree(original)
-            _, nn_idx = tree.query(decoded)
-            displacement = original[nn_idx] - decoded
-
-            # Curvature on decoded cloud (forward_self signal)
-            logger.info(f"Computing curvature for {seq} ({len(decoded)} points)...")
-            curvature = compute_curvature(decoded, k=curvature_k)
-
-            cloud_idx = len(self.decoded_clouds)
-            self.decoded_clouds.append(decoded)
-            self.displacements.append(displacement.astype(np.float32))
-            self.curvatures.append(curvature)
-
-            # Extract patches
-            cloud_patches = extract_patches(decoded, patch_size, stride, min_points)
-            for patch_indices in cloud_patches:
-                self.patches.append((cloud_idx, patch_indices))
-
-            logger.info(f"  {seq}: {len(decoded)} pts, {len(cloud_patches)} patches")
-
-        logger.info(f"Total patches: {len(self.patches)}")
-
-    def __len__(self) -> int:
-        return len(self.patches)
-
-    def __getitem__(self, idx: int):
-        cloud_idx, point_indices = self.patches[idx]
-
-        coords = self.decoded_clouds[cloud_idx][point_indices].copy()
-        curvature = self.curvatures[cloud_idx][point_indices]
-        displacement = self.displacements[cloud_idx][point_indices].copy()
-
-        # Random rigid augmentation: axis permutation + sign flips
-        if self.augment:
-            axes = np.random.permutation(3)
-            signs = np.random.choice([-1, 1], size=3).astype(np.float32)
-            coords = coords[:, axes] * signs
-            displacement = displacement[:, axes] * signs
-
-        # Features: normalized coords + curvature
-        features = np.column_stack(
-            [
-                coords / COORD_SCALE,
-                curvature[:, np.newaxis],
-            ]
-        ).astype(np.float32)
-
-        # Integer coordinates for sparse tensor
-        coords_int = np.floor(coords).astype(np.int32)
-
-        return coords_int, features, displacement, curvature
-
-    @staticmethod
-    def collate_fn(batch):
-        """Collate using ME sparse_collate, also batching displacement and curvature."""
-        coords_list, feats_list, disp_list, curv_list = zip(*batch)
-
-        coords_batch, feats_batch = ME.utils.sparse_collate(
-            [torch.from_numpy(c) for c in coords_list],
-            [torch.from_numpy(f) for f in feats_list],
-        )
-        disp_batch = torch.from_numpy(np.concatenate(disp_list, axis=0))
-        curv_batch = torch.from_numpy(np.concatenate(curv_list, axis=0))
-
-        return coords_batch, feats_batch, disp_batch, curv_batch
-
-
 class MultiFrameDataset(Dataset):
     """Dataset for multi-frame, multi-rate training data.
 
@@ -225,22 +133,24 @@ class MultiFrameDataset(Dataset):
         max_clouds: Optional[int] = None,
         augment: bool = False,
         frame_stride: int = 1,
-        displacement_k: int = 1,
         use_chamfer: bool = False,
         chamfer_padding: int = 10,
     ):
         self.data_root = Path(data_root)
         self.patch_size = patch_size
         self.augment = augment
-        self.displacement_k = displacement_k
         self.use_chamfer = use_chamfer
         self.chamfer_padding = chamfer_padding
         self.patches: List[Tuple[int, np.ndarray]] = []
+        self.patch_rates: List[str] = []  # rate label per patch
 
+        self._epoch: int = 0
         self.decoded_clouds: List[np.ndarray] = []
         self.original_clouds: List[np.ndarray] = []  # only populated when use_chamfer
-        self.displacements: List[np.ndarray] = []  # (N, 3) if K=1, (N, K, 3) if K>1
+        self.displacements: List[np.ndarray] = []
         self.curvatures: List[np.ndarray] = []
+        self.cloud_metadata: List[Tuple[str, int]] = []  # (sequence, frame) per cloud
+        self.patch_origins: List[Tuple[int, int, int]] = []  # grid origin per patch
 
         # Load manifest and filter
         manifest_path = self.data_root / "manifest.json"
@@ -265,7 +175,16 @@ class MultiFrameDataset(Dataset):
             manifest = subsampled
 
         if max_clouds is not None:
-            manifest = manifest[:max_clouds]
+            # Apply limit per rate to avoid truncating to a single rate
+            from collections import defaultdict as _dd
+
+            rate_groups = _dd(list)
+            for e in manifest:
+                rate_groups[e["rate"]].append(e)
+            per_rate = max(1, max_clouds // max(len(rate_groups), 1))
+            manifest = []
+            for entries in rate_groups.values():
+                manifest.extend(entries[:per_rate])
 
         logger.info(
             f"MultiFrameDataset: {len(manifest)} clouds "
@@ -306,25 +225,14 @@ class MultiFrameDataset(Dataset):
                 # No displacement needed -- store dummy, original stored separately
                 displacement = np.zeros((len(decoded), 3), dtype=np.float32)
             else:
-                # Precomputed or inline displacement
-                if displacement_k > 1:
-                    disp_path = frame_dir / f"displacement_k{displacement_k}_{rate}.npy"
-                else:
-                    disp_path = frame_dir / f"displacement_{rate}.npy"
-
+                disp_path = frame_dir / f"displacement_{rate}.npy"
                 if disp_path.exists():
                     displacement = np.load(disp_path)
                 elif cache_key in original_cache:
                     original = original_cache[cache_key]
                     tree = cKDTree(original)
-                    if displacement_k > 1:
-                        _, nn_idx = tree.query(decoded, k=displacement_k)
-                        displacement = (
-                            original[nn_idx] - decoded[:, np.newaxis, :]
-                        ).astype(np.float32)
-                    else:
-                        _, nn_idx = tree.query(decoded)
-                        displacement = (original[nn_idx] - decoded).astype(np.float32)
+                    _, nn_idx = tree.query(decoded)
+                    displacement = (original[nn_idx] - decoded).astype(np.float32)
                 else:
                     logger.warning(f"No displacement source for {frame_dir}")
                     continue
@@ -333,6 +241,7 @@ class MultiFrameDataset(Dataset):
             self.decoded_clouds.append(decoded)
             self.displacements.append(displacement)
             self.curvatures.append(curvature)
+            self.cloud_metadata.append((seq, frame))
 
             if use_chamfer and cache_key in original_cache:
                 self.original_clouds.append(original_cache[cache_key])
@@ -342,8 +251,14 @@ class MultiFrameDataset(Dataset):
 
             # Extract patches
             cloud_patches = extract_patches(decoded, patch_size, stride, min_points)
+            cloud_mins = decoded.min(axis=0)
             for patch_indices in cloud_patches:
                 self.patches.append((cloud_idx, patch_indices))
+                self.patch_rates.append(rate)
+                # Compute grid origin: quantized min of patch points
+                patch_min = decoded[patch_indices].min(axis=0)
+                grid_origin = np.floor((patch_min - cloud_mins) / stride).astype(int)
+                self.patch_origins.append(tuple(grid_origin))
 
         # Clear original cache to free memory (keep originals in self if chamfer)
         original_cache.clear()
@@ -352,6 +267,10 @@ class MultiFrameDataset(Dataset):
             f"MultiFrameDataset ready: {len(self.decoded_clouds)} clouds, "
             f"{len(self.patches)} patches"
         )
+
+    def set_epoch(self, epoch: int):
+        """Set epoch for deterministic augmentation seeding."""
+        self._epoch = epoch
 
     def __len__(self) -> int:
         return len(self.patches)
@@ -373,15 +292,16 @@ class MultiFrameDataset(Dataset):
             mask = np.all((orig_cloud >= mins) & (orig_cloud <= maxs), axis=1)
             orig_crop = orig_cloud[mask].astype(np.float32)
 
-        # Random rigid augmentation: axis permutation + sign flips
+        # Deterministic rigid augmentation: seeded by spatial identity (not rate)
         if self.augment:
-            axes = np.random.permutation(3)
-            signs = np.random.choice([-1, 1], size=3).astype(np.float32)
+            seq, frame = self.cloud_metadata[cloud_idx]
+            origin = self.patch_origins[idx]
+            seed = hash((seq, frame, origin, self._epoch)) & 0xFFFFFFFF
+            rng = np.random.RandomState(seed)
+            axes = rng.permutation(3)
+            signs = rng.choice([-1, 1], size=3).astype(np.float32)
             coords = coords[:, axes] * signs
-            if displacement.ndim == 3:  # (N, K, 3)
-                displacement = displacement[:, :, axes] * signs
-            else:  # (N, 3)
-                displacement = displacement[:, axes] * signs
+            displacement = displacement[:, axes] * signs
             if orig_crop is not None:
                 orig_crop = orig_crop[:, axes] * signs
 
@@ -394,15 +314,17 @@ class MultiFrameDataset(Dataset):
 
         coords_int = np.floor(coords).astype(np.int32)
 
-        if self.use_chamfer:
-            return coords_int, features, orig_crop, curvature
+        rate_index = RATE_BPP[self.patch_rates[idx]]
 
-        return coords_int, features, displacement, curvature
+        if self.use_chamfer:
+            return coords_int, features, orig_crop, curvature, rate_index
+
+        return coords_int, features, displacement, curvature, rate_index
 
     @staticmethod
     def collate_fn(batch):
         """Collate using ME sparse_collate, also batching displacement and curvature."""
-        coords_list, feats_list, disp_list, curv_list = zip(*batch)
+        coords_list, feats_list, disp_list, curv_list, rate_list = zip(*batch)
 
         coords_batch, feats_batch = ME.utils.sparse_collate(
             [torch.from_numpy(c) for c in coords_list],
@@ -410,13 +332,14 @@ class MultiFrameDataset(Dataset):
         )
         disp_batch = torch.from_numpy(np.concatenate(disp_list, axis=0))
         curv_batch = torch.from_numpy(np.concatenate(curv_list, axis=0))
+        rate_batch = torch.tensor(rate_list, dtype=torch.float32)
 
-        return coords_batch, feats_batch, disp_batch, curv_batch
+        return coords_batch, feats_batch, disp_batch, curv_batch, rate_batch
 
     @staticmethod
     def collate_fn_chamfer(batch):
         """Collate for chamfer mode: orig_coords kept as list (variable size)."""
-        coords_list, feats_list, orig_list, curv_list = zip(*batch)
+        coords_list, feats_list, orig_list, curv_list, rate_list = zip(*batch)
 
         coords_batch, feats_batch = ME.utils.sparse_collate(
             [torch.from_numpy(c) for c in coords_list],
@@ -425,5 +348,100 @@ class MultiFrameDataset(Dataset):
         # orig_coords are variable size -- keep as list of tensors
         orig_batch = [torch.from_numpy(o) for o in orig_list]
         curv_batch = torch.from_numpy(np.concatenate(curv_list, axis=0))
+        rate_batch = torch.tensor(rate_list, dtype=torch.float32)
 
-        return coords_batch, feats_batch, orig_batch, curv_batch
+        return coords_batch, feats_batch, orig_batch, curv_batch, rate_batch
+
+
+class RateBalancedBatchSampler(Sampler):
+    """Yields mixed-rate batches with equal patches per rate.
+
+    Each batch has batch_size // num_rates patches from each rate.
+    The larger rate group is undersampled to match the smaller group per epoch.
+    """
+
+    def __init__(
+        self, patch_rates: List[str], batch_size: int, drop_last: bool = False
+    ):
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+
+        self.rate_indices: Dict[str, List[int]] = {}
+        for idx, rate in enumerate(patch_rates):
+            self.rate_indices.setdefault(rate, []).append(idx)
+
+        self.rates = sorted(self.rate_indices.keys())
+        self.num_rates = len(self.rates)
+        self.per_rate = batch_size // self.num_rates
+
+        # Undersample to smallest rate group
+        self.epoch_size = min(len(v) for v in self.rate_indices.values())
+        self._n_batches = self.epoch_size // self.per_rate
+        if not drop_last and self.epoch_size % self.per_rate != 0:
+            self._n_batches += 1
+
+    def __iter__(self):
+        # Shuffle and truncate each rate to epoch_size
+        rate_pools = {}
+        for rate in self.rates:
+            indices = self.rate_indices[rate].copy()
+            np.random.shuffle(indices)
+            rate_pools[rate] = indices[: self.epoch_size]
+
+        # Zip rates together into mixed batches
+        for i in range(0, self.epoch_size, self.per_rate):
+            batch = []
+            for rate in self.rates:
+                batch.extend(rate_pools[rate][i : i + self.per_rate])
+            if self.drop_last and len(batch) < self.batch_size:
+                continue
+            yield batch
+
+    def __len__(self):
+        return self._n_batches
+
+
+class RateStratifiedBatchSampler(Sampler):
+    """Yields batches where all patches share the same compression rate.
+
+    Each epoch: shuffle rates, then for each rate shuffle its patches and
+    yield fixed-size batches. Ensures no gradient conflict across rates.
+    """
+
+    def __init__(
+        self, patch_rates: List[str], batch_size: int, drop_last: bool = False
+    ):
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+
+        # Group patch indices by rate
+        self.rate_indices: Dict[str, List[int]] = {}
+        for idx, rate in enumerate(patch_rates):
+            self.rate_indices.setdefault(rate, []).append(idx)
+
+        # Total batches for __len__
+        self._n_batches = 0
+        for indices in self.rate_indices.values():
+            n = (
+                len(indices) // batch_size
+                if drop_last
+                else (len(indices) + batch_size - 1) // batch_size
+            )
+            self._n_batches += n
+
+    def __iter__(self):
+        rates = list(self.rate_indices.keys())
+        np.random.shuffle(rates)
+
+        for rate in rates:
+            indices = self.rate_indices[rate].copy()
+            np.random.shuffle(indices)
+
+            for i in range(0, len(indices), self.batch_size):
+                batch = indices[i : i + self.batch_size]
+                if self.drop_last and len(batch) < self.batch_size:
+                    continue
+                yield batch
+
+    def __len__(self):
+        return self._n_batches

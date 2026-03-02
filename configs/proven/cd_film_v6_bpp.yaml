@@ -1,0 +1,22 @@
+# FiLM v6: Output-only FiLM with continuous BPP conditioning, r2+r4+r6
+# Based on proven v5 (cd_film_v5_head.yaml) but replaces onehot(7-dim)
+# with continuous bpp scalar(1-dim) for arbitrary-rate generalization.
+# Rates spaced across bpp range: 0.05, 0.15, 0.30 bpp
+data:
+  rates: [r2, r4, r6]
+  frame_stride: 12
+  augment: true
+  use_curvature: false
+
+model:
+  model_type: film_head
+  film_rate_repr: bpp
+
+loss:
+  loss_type: cd
+
+batch_size: 40
+lr: 5e-4
+weight_decay: 1e-4
+warmup_epochs: 3
+epochs: 30

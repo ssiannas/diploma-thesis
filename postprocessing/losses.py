@@ -1,21 +1,50 @@
 """Loss functions for displacement-based post-processing.
 
-Curvature-weighted L1: direct displacement supervision with edge upweighting.
-
 Chamfer loss: dynamic re-matching via NN search each forward pass.
-
-Laplacian preservation loss: directly targets oversmoothing by matching the
-discrete Laplacian (local curvature) of the refined cloud to the original.
-Neighborhood graph is fixed from decoded positions, making it fully
-differentiable without re-matching.
-
-Stratified loss: soft sigmoid gating splits Laplacian (edges) from zero-displacement
-penalty (flat) with Kendall learned uncertainty weighting for automatic balancing.
+Variants: focal-weighted, edge-gated, with kNN Laplacian, with voxel Laplacian.
 """
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import MinkowskiEngine as ME
 import torch
 import torch.nn.functional as F
+
+
+class VoxelLaplacian(torch.nn.Module):
+    """Fixed-weight sparse 3D Laplacian operator.
+
+    Implements the discrete Laplacian as a non-learnable MinkowskiConvolution
+    with kernel_size=3. Center weight = -6, 6 face-neighbors = +1.
+    Gradients flow through the input features, not through the operator.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.conv = ME.MinkowskiConvolution(
+            in_channels=3,
+            out_channels=3,
+            kernel_size=3,
+            bias=False,
+            dimension=3,
+        )
+        # Freeze weights
+        self.conv.kernel.requires_grad_(False)
+        # Set Laplacian stencil: per-channel identity with spatial Laplacian
+        # Kernel shape: (27, in_ch, out_ch) for 3x3x3
+        with torch.no_grad():
+            self.conv.kernel.zero_()
+            # 3x3x3 lexicographic: face neighbors at indices 4,10,12,14,16,22
+            # center at index 13
+            face_idx = [4, 10, 12, 14, 16, 22]
+            for c in range(3):
+                self.conv.kernel[13, c, c] = -6.0
+                for fi in face_idx:
+                    self.conv.kernel[fi, c, c] = 1.0
+
+    def forward(self, x: ME.SparseTensor) -> ME.SparseTensor:
+        return self.conv(x)
 
 
 class KendallUncertaintyWeights(torch.nn.Module):
@@ -42,509 +71,14 @@ class KendallUncertaintyWeights(torch.nn.Module):
         return [0.5 * torch.exp(-lv).item() for lv in self.log_vars]
 
 
-def curvature_weighted_l1_loss(
-    pred: ME.SparseTensor,
-    gt_displacement: torch.Tensor,
-    curvature: torch.Tensor,
-    alpha: float = 10.0,
-    mag_floor: float = 0.1,
-    smooth_l1_beta: float = 0.0,
-    lambda_shrink: float = 0.0,
-    shrink_gamma: float = 0.0,
-    edge_threshold: float = 0.0,
-) -> torch.Tensor:
-    """Displacement loss with optional edge masking and curvature-gated shrinkage.
-
-    When edge_threshold > 0: displacement loss only on edge points
-    (curvature > threshold), shrinkage only on flat points. No conflicting
-    gradients -- flat regions get "predict zero", edges get "match GT".
-    """
-    if smooth_l1_beta > 0:
-        per_point = F.smooth_l1_loss(
-            pred.F, gt_displacement, reduction="none", beta=smooth_l1_beta
-        )
-    else:
-        per_point = torch.abs(pred.F - gt_displacement)
-
-    if edge_threshold > 0:
-        # Hard edge mask: displacement loss only on high-curvature points
-        edge_mask = curvature > edge_threshold  # (N,)
-        if edge_mask.any():
-            loss = per_point[edge_mask].mean()
-        else:
-            loss = torch.tensor(0.0, device=pred.F.device)
-    else:
-        # Legacy: full weighted displacement loss
-        curv_w = 1.0 + alpha * curvature.unsqueeze(-1)
-        gt_mag = gt_displacement.norm(dim=-1, keepdim=True)
-        nonzero_mask = (gt_mag > 1e-6).float()
-        mag_w = mag_floor + (1.0 - mag_floor) * nonzero_mask
-        loss = (curv_w * mag_w * per_point).mean()
-
-    if lambda_shrink > 0:
-        if shrink_gamma > 0:
-            flat_w = torch.exp(-shrink_gamma * curvature)  # (N,)
-            shrink = (flat_w * pred.F.pow(2).sum(dim=-1)).mean()
-        else:
-            gt_mag = gt_displacement.norm(dim=-1)
-            zero_mask = gt_mag < 1e-6
-            if zero_mask.any():
-                shrink = pred.F[zero_mask].pow(2).mean()
-            else:
-                shrink = torch.tensor(0.0, device=pred.F.device)
-        loss = loss + lambda_shrink * shrink
-
-    return loss
-
-
-def min_of_k_displacement_loss(
-    pred: ME.SparseTensor,
-    gt_displacement_k: torch.Tensor,
-    curvature: torch.Tensor,
-    alpha: float = 0.0,
-    smooth_l1_beta: float = 1.0,
-    lambda_shrink: float = 0.0,
-) -> torch.Tensor:
-    """Min-of-K displacement loss for ambiguous NN targets.
-
-    For each point, computes loss against K candidate displacements and takes
-    the minimum. At edges where NN jumps between sides of a sharp feature,
-    the network only needs to match whichever side is geometrically consistent.
-
-    Args:
-        gt_displacement_k: (N, K, 3) K candidate displacements per point
-    """
-    K = gt_displacement_k.shape[1]
-    pred_expanded = pred.F.unsqueeze(1).expand_as(gt_displacement_k)  # (N, K, 3)
-
-    if smooth_l1_beta > 0:
-        per_k = F.smooth_l1_loss(
-            pred_expanded, gt_displacement_k, reduction="none", beta=smooth_l1_beta
-        )  # (N, K, 3)
-    else:
-        per_k = torch.abs(pred_expanded - gt_displacement_k)
-
-    per_k_loss = per_k.sum(dim=-1)  # (N, K) -- sum over xyz, keep K
-    min_loss = per_k_loss.min(dim=1).values  # (N,) -- min over K candidates
-
-    curv_w = 1.0 + alpha * curvature  # (N,)
-    loss = (curv_w * min_loss).mean()
-
-    if lambda_shrink > 0:
-        # For shrinkage: a point has zero GT if ALL K candidates are zero
-        all_zero = (gt_displacement_k.norm(dim=-1) < 1e-6).all(dim=1)  # (N,)
-        if all_zero.any():
-            loss = loss + lambda_shrink * pred.F[all_zero].pow(2).mean()
-
-    return loss
-
-
 COORD_SCALE = 1023.0
-
-
-def _batched_knn(points: torch.Tensor, k: int) -> torch.Tensor:
-    """Compute kNN indices within each patch of a batched point cloud.
-
-    Args:
-        points: (B, M, 3) decoded coordinates
-        k: number of neighbors (excluding self)
-
-    Returns:
-        knn_idx: (B, M, k) neighbor indices into the M dimension
-    """
-    dists = torch.cdist(points, points)  # (B, M, M)
-    # topk smallest distances; index 0 is self (dist=0), so take k+1 and skip first
-    _, idx = dists.topk(k + 1, dim=2, largest=False)
-    return idx[:, :, 1:]  # (B, M, k)
-
-
-def _gather_neighbors(points: torch.Tensor, knn_idx: torch.Tensor) -> torch.Tensor:
-    """Gather neighbor positions using kNN indices.
-
-    Args:
-        points: (B, M, 3)
-        knn_idx: (B, M, k)
-
-    Returns:
-        neighbors: (B, M, k, 3)
-    """
-    B, M, k = knn_idx.shape
-    flat_idx = knn_idx.reshape(B, M * k)  # (B, M*k)
-    flat_idx_3d = flat_idx.unsqueeze(-1).expand(-1, -1, 3)  # (B, M*k, 3)
-    return torch.gather(points, 1, flat_idx_3d).reshape(B, M, k, 3)
-
-
-def laplacian_loss(
-    pred: ME.SparseTensor,
-    input_sparse: ME.SparseTensor,
-    gt_displacement: torch.Tensor,
-    curvature: torch.Tensor,
-    alpha: float = 3.0,
-    k: int = 8,
-) -> torch.Tensor:
-    """Laplacian preservation loss -- directly targets oversmoothing.
-
-    Computes discrete Laplacian L(p_i) = p_i - mean(neighbors(p_i)) on a fixed
-    neighborhood graph from decoded positions. Penalizes the difference between
-    the refined cloud's Laplacian and the original cloud's Laplacian.
-
-    Unlike displacement or Chamfer losses, this does not depend on point-to-point
-    correspondence. It measures local geometric sharpness directly: oversmoothed
-    regions have attenuated Laplacians, so minimizing |L_refined - L_original|
-    drives the model to restore high-frequency surface detail.
-
-    The neighborhood graph is built once from decoded positions and reused for
-    both refined and original Laplacian computation, making the loss fully
-    differentiable without dynamic re-matching.
-    """
-    decoded = input_sparse.F[:, :3] * COORD_SCALE  # (N, 3)
-    refined = decoded + pred.F  # (N, 3), has grad
-    original = (decoded + gt_displacement).detach()  # (N, 3), no grad
-
-    batch_idx = pred.C[:, 0]
-    curv_w = 1.0 + alpha * curvature  # (N,)
-
-    unique_batches, counts = batch_idx.unique(return_counts=True)
-    n_patches = unique_batches.shape[0]
-
-    if n_patches == 0:
-        return torch.tensor(0.0, device=pred.F.device)
-
-    # Fast path: equal-size patches
-    if counts.min() == counts.max():
-        M = counts[0].item()
-        k_actual = min(k, M - 1)
-
-        dec_3d = decoded.view(n_patches, M, 3)
-        ref_3d = refined.view(n_patches, M, 3)
-        orig_3d = original.view(n_patches, M, 3)
-        w_3d = curv_w.view(n_patches, M)
-
-        # Fixed kNN graph from decoded positions
-        knn_idx = _batched_knn(dec_3d, k_actual)  # (B, M, k)
-
-        # Laplacian = point - mean(neighbors)
-        ref_neighbors = _gather_neighbors(ref_3d, knn_idx)  # (B, M, k, 3)
-        orig_neighbors = _gather_neighbors(orig_3d, knn_idx)  # (B, M, k, 3)
-
-        lap_refined = ref_3d - ref_neighbors.mean(dim=2)  # (B, M, 3)
-        lap_original = orig_3d - orig_neighbors.mean(dim=2)  # (B, M, 3)
-
-        # Curvature-weighted L1 on Laplacian difference
-        lap_diff = torch.abs(lap_refined - lap_original)  # (B, M, 3)
-        return (w_3d.unsqueeze(-1) * lap_diff).mean()
-
-    # Slow fallback: variable-size patches
-    total_loss = torch.tensor(0.0, device=pred.F.device)
-    for b in unique_batches:
-        mask = batch_idx == b
-        dec_b = decoded[mask].unsqueeze(0)  # (1, M, 3)
-        ref_b = refined[mask].unsqueeze(0)
-        orig_b = original[mask].unsqueeze(0)
-        w_b = curv_w[mask]
-        M_b = dec_b.shape[1]
-        k_b = min(k, M_b - 1)
-
-        knn_idx = _batched_knn(dec_b, k_b)
-        ref_nb = _gather_neighbors(ref_b, knn_idx)
-        orig_nb = _gather_neighbors(orig_b, knn_idx)
-
-        lap_ref = ref_b.squeeze(0) - ref_nb.squeeze(0).mean(dim=1)
-        lap_orig = orig_b.squeeze(0) - orig_nb.squeeze(0).mean(dim=1)
-
-        lap_diff = torch.abs(lap_ref - lap_orig)
-        total_loss = total_loss + (w_b.unsqueeze(-1) * lap_diff).mean()
-
-    return total_loss / max(n_patches, 1)
-
-
-def stratified_loss(
-    pred: ME.SparseTensor,
-    input_sparse: ME.SparseTensor,
-    gt_displacement: torch.Tensor,
-    curvature: torch.Tensor,
-    kendall: KendallUncertaintyWeights,
-    alpha: float = 3.0,
-    k: int = 8,
-    beta: float = 5.0,
-    tau: float = 0.33,
-) -> tuple:
-    """Soft-gated stratified loss: Laplacian on edges, zero-penalty on flat.
-
-    Uses sigmoid gating on curvature to smoothly split points into edge/flat:
-        w_i = sigmoid(beta * (kappa_i - tau))
-    Edge term: Laplacian preservation (restore sharpness)
-    Flat term: ||displacement||^2 penalty (don't move)
-    Balanced via Kendall learned uncertainty weighting.
-
-    Returns (total_loss, edge_loss, flat_loss) for logging.
-    """
-    decoded = input_sparse.F[:, :3] * COORD_SCALE  # (N, 3)
-    refined = decoded + pred.F
-    original = (decoded + gt_displacement).detach()
-
-    batch_idx = pred.C[:, 0]
-    unique_batches, counts = batch_idx.unique(return_counts=True)
-    n_patches = unique_batches.shape[0]
-
-    # Soft gate: high w = edge, low w = flat
-    w = torch.sigmoid(beta * (curvature - tau))  # (N,)
-
-    # -- Flat term: zero-displacement penalty --
-    disp_magnitude = pred.F.pow(2).sum(dim=-1)  # (N,)
-    flat_loss = ((1.0 - w) * disp_magnitude).mean()
-
-    # -- Edge term: Laplacian preservation --
-    if n_patches == 0:
-        edge_loss = torch.tensor(0.0, device=pred.F.device)
-    elif counts.min() == counts.max():
-        M = counts[0].item()
-        k_actual = min(k, M - 1)
-
-        dec_3d = decoded.view(n_patches, M, 3)
-        ref_3d = refined.view(n_patches, M, 3)
-        orig_3d = original.view(n_patches, M, 3)
-        w_3d = w.view(n_patches, M)
-
-        knn_idx = _batched_knn(dec_3d, k_actual)
-        ref_neighbors = _gather_neighbors(ref_3d, knn_idx)
-        orig_neighbors = _gather_neighbors(orig_3d, knn_idx)
-
-        lap_refined = ref_3d - ref_neighbors.mean(dim=2)
-        lap_original = orig_3d - orig_neighbors.mean(dim=2)
-
-        lap_diff = torch.abs(lap_refined - lap_original)  # (B, M, 3)
-        # Weight by soft gate (only edge points contribute)
-        edge_loss = (w_3d.unsqueeze(-1) * lap_diff).mean()
-    else:
-        # Slow fallback
-        edge_loss = torch.tensor(0.0, device=pred.F.device)
-        for b in unique_batches:
-            mask = batch_idx == b
-            dec_b = decoded[mask].unsqueeze(0)
-            ref_b = refined[mask].unsqueeze(0)
-            orig_b = original[mask].unsqueeze(0)
-            w_b = w[mask]
-            M_b = dec_b.shape[1]
-            k_b = min(k, M_b - 1)
-
-            knn_idx = _batched_knn(dec_b, k_b)
-            ref_nb = _gather_neighbors(ref_b, knn_idx)
-            orig_nb = _gather_neighbors(orig_b, knn_idx)
-
-            lap_ref = ref_b.squeeze(0) - ref_nb.squeeze(0).mean(dim=1)
-            lap_orig = orig_b.squeeze(0) - orig_nb.squeeze(0).mean(dim=1)
-
-            lap_diff = torch.abs(lap_ref - lap_orig)
-            edge_loss = edge_loss + (w_b.unsqueeze(-1) * lap_diff).mean()
-        edge_loss = edge_loss / max(n_patches, 1)
-
-    total = kendall(edge_loss, flat_loss)
-    return total, edge_loss.detach(), flat_loss.detach()
-
-
-def stratified_displacement_loss(
-    pred: ME.SparseTensor,
-    gt_displacement: torch.Tensor,
-    curvature: torch.Tensor,
-    kendall: KendallUncertaintyWeights,
-    smooth_l1_beta: float = 1.0,
-    beta: float = 5.0,
-    tau: float = 0.33,
-) -> tuple:
-    """Soft-gated stratified loss: displacement L1 on edges, zero-penalty on flat.
-
-    Unlike stratified_loss (Laplacian edge term), the edge term here is smooth L1
-    displacement which has a non-zero minimum and cannot collapse to zero.
-
-    Returns (total_loss, edge_loss, flat_loss) for logging.
-    """
-    # Soft gate: high w = edge, low w = flat
-    w = torch.sigmoid(beta * (curvature - tau))  # (N,)
-
-    # Edge term: smooth L1 displacement (has non-zero optimum, won't collapse)
-    if smooth_l1_beta > 0:
-        per_point = F.smooth_l1_loss(
-            pred.F, gt_displacement, reduction="none", beta=smooth_l1_beta
-        )
-    else:
-        per_point = torch.abs(pred.F - gt_displacement)
-    edge_loss = (w.unsqueeze(-1) * per_point).mean()
-
-    # Flat term: zero-displacement penalty (don't move flat regions)
-    disp_magnitude = pred.F.pow(2).sum(dim=-1)  # (N,)
-    flat_loss = ((1.0 - w) * disp_magnitude).mean()
-
-    total = kendall(edge_loss, flat_loss)
-    return total, edge_loss.detach(), flat_loss.detach()
-
-
-def gated_displacement_loss(
-    pred: ME.SparseTensor,
-    gate: ME.SparseTensor,
-    gt_displacement: torch.Tensor,
-    smooth_l1_beta: float = 0.1,
-    lambda_gate: float = 1.0,
-    gate_eps: float = 1e-3,
-) -> tuple:
-    """Gated displacement loss: displacement on nonzero-GT only, gate on all.
-
-    L_disp: Huber on nonzero-GT points ONLY. Zero-GT points get no
-    displacement gradient -- the gate learns to suppress them instead.
-    This lets the displacement head learn full-magnitude corrections
-    without conflicting zero-point pressure.
-
-    L_gate: BCE on ALL points against indicator(||d_gt|| > gate_eps).
-
-    Returns (total_loss, extras_dict) for logging.
-    """
-    gt_mag = gt_displacement.norm(dim=-1)  # (N,)
-    nonzero_mask = gt_mag > gate_eps  # (N,)
-    n_nonzero = nonzero_mask.sum().clamp(min=1)
-
-    # Displacement loss on nonzero-GT points only
-    if smooth_l1_beta > 0:
-        per_point = F.smooth_l1_loss(
-            pred.F, gt_displacement, reduction="none", beta=smooth_l1_beta
-        ).mean(
-            dim=-1
-        )  # (N,) mean over xyz
-    else:
-        per_point = torch.abs(pred.F - gt_displacement).mean(dim=-1)
-
-    l_disp = per_point[nonzero_mask].sum() / n_nonzero
-
-    # Gate BCE loss
-    gate_target = nonzero_mask.float()  # 1 = should move, 0 = should stay
-    gate_pred = gate.F.squeeze(-1)  # (N,)
-    l_gate = F.binary_cross_entropy(gate_pred, gate_target)
-
-    total = l_disp + lambda_gate * l_gate
-
-    extras = {
-        "l_disp": l_disp.item(),
-        "l_gate": l_gate.item(),
-        "gate_mean": gate_pred.mean().item(),
-        "gate_nonzero_mean": (
-            gate_pred[nonzero_mask].mean().item() if nonzero_mask.any() else 0.0
-        ),
-        "gate_zero_mean": (
-            gate_pred[~nonzero_mask].mean().item() if (~nonzero_mask).any() else 0.0
-        ),
-    }
-    return total, extras
-
-
-def threshold_gated_loss(
-    pred: ME.SparseTensor,
-    gate: ME.SparseTensor,
-    gt_displacement: torch.Tensor,
-    smooth_l1_beta: float = 0.1,
-    lambda_gate: float = 1.0,
-    gate_eps: float = 1e-3,
-) -> tuple:
-    """Hurdle loss for threshold-gated displacement model.
-
-    L_disp: Huber on nonzero-GT points only (displacement head learns
-    full-magnitude corrections without zero-point pressure).
-
-    L_gate: BCE on the threshold-derived gate. Since the gate comes from
-    sigmoid(k * (||d_pred|| - theta)), this BCE gradient flows back through
-    both the displacement magnitude AND the threshold, teaching the network
-    to produce large displacements where GT is nonzero and keep them below
-    threshold where GT is zero. No MTL gradient conflict.
-
-    Returns (total_loss, extras_dict) for logging.
-    """
-    gt_mag = gt_displacement.norm(dim=-1)  # (N,)
-    nonzero_mask = gt_mag > gate_eps  # (N,)
-    n_nonzero = nonzero_mask.sum().clamp(min=1)
-
-    # Displacement loss on nonzero-GT points only
-    if smooth_l1_beta > 0:
-        per_point = F.smooth_l1_loss(
-            pred.F, gt_displacement, reduction="none", beta=smooth_l1_beta
-        ).mean(dim=-1)
-    else:
-        per_point = torch.abs(pred.F - gt_displacement).mean(dim=-1)
-
-    l_disp = per_point[nonzero_mask].sum() / n_nonzero
-
-    # Gate BCE loss -- teaches threshold and displacement magnitude jointly
-    gate_target = nonzero_mask.float()
-    gate_pred = gate.F.squeeze(-1).clamp(1e-6, 1 - 1e-6)  # (N,)
-    l_gate = F.binary_cross_entropy(gate_pred, gate_target)
-
-    total = l_disp + lambda_gate * l_gate
-
-    extras = {
-        "l_disp": l_disp.item(),
-        "l_gate": l_gate.item(),
-        "gate_mean": gate_pred.mean().item(),
-        "gate_nonzero_mean": (
-            gate_pred[nonzero_mask].mean().item() if nonzero_mask.any() else 0.0
-        ),
-        "gate_zero_mean": (
-            gate_pred[~nonzero_mask].mean().item() if (~nonzero_mask).any() else 0.0
-        ),
-    }
-    return total, extras
-
-
-def chamfer_loss(
-    pred: ME.SparseTensor,
-    input_sparse: ME.SparseTensor,
-    gt_displacement: torch.Tensor,
-    curvature: torch.Tensor,
-    alpha: float = 3.0,
-) -> torch.Tensor:
-    """Chamfer distance loss with dynamic re-matching per forward pass.
-
-    Uses batched cdist when all patches are equal-sized (typical case).
-    Falls back to per-patch loop for variable-size patches.
-    """
-    decoded = input_sparse.F[:, :3] * COORD_SCALE  # (N, 3)
-    refined = decoded + pred.F  # (N, 3), has grad
-    target = (decoded + gt_displacement).detach()  # (N, 3), no grad
-
-    batch_idx = pred.C[:, 0]
-    curv_w = 1.0 + alpha * curvature  # (N,)
-
-    unique_batches, counts = batch_idx.unique(return_counts=True)
-    n_patches = unique_batches.shape[0]
-
-    # Fast path: all patches same size -> batched cdist
-    if counts.min() == counts.max() and n_patches > 0:
-        M = counts[0].item()
-        ref_3d = refined.view(n_patches, M, 3)
-        tgt_3d = target.view(n_patches, M, 3)
-        w_3d = curv_w.view(n_patches, M)
-
-        dists = torch.cdist(ref_3d, tgt_3d)  # (B, M, M)
-        fwd_min = dists.min(dim=2).values  # (B, M)
-        bwd_min = dists.min(dim=1).values  # (B, M)
-
-        fwd_loss = (w_3d * fwd_min).mean(dim=1)  # (B,)
-        bwd_loss = (w_3d * bwd_min).mean(dim=1)  # (B,)
-        return (fwd_loss + bwd_loss).mean()
-
-    # Slow fallback: variable-size patches
-    total_loss = torch.tensor(0.0, device=pred.F.device)
-    for b in unique_batches:
-        mask = batch_idx == b
-        ref_b = refined[mask]
-        tgt_b = target[mask]
-        w_b = curv_w[mask]
-        dists = torch.cdist(ref_b, tgt_b)
-        fwd_min = dists.min(dim=1).values
-        bwd_min = dists.min(dim=0).values
-        total_loss = total_loss + (w_b * fwd_min).mean() + (w_b * bwd_min).mean()
-    return total_loss / max(n_patches, 1)
 
 
 def dynamic_chamfer_loss(
     pred: ME.SparseTensor,
     original_patches: list,
+    fwd_weight: float = 1.0,
+    rev_weight: float = 1.0,
 ) -> tuple:
     """Chamfer distance between refined points and actual original cloud crops.
 
@@ -583,9 +117,417 @@ def dynamic_chamfer_loss(
         total_fwd += fwd
         total_rev += rev
 
-    loss = (total_fwd + total_rev) / max(n_patches, 1)
+    loss = (fwd_weight * total_fwd + rev_weight * total_rev) / max(n_patches, 1)
     extras = {
         "cd_fwd": float(total_fwd) / max(n_patches, 1) if n_patches > 0 else 0,
         "cd_rev": float(total_rev) / max(n_patches, 1) if n_patches > 0 else 0,
     }
     return loss, extras
+
+
+def cd_vlap_loss(
+    pred: ME.SparseTensor,
+    original_patches: list,
+    lap_op: VoxelLaplacian,
+    kendall: KendallUncertaintyWeights,
+    fwd_weight: float = 1.0,
+    rev_weight: float = 1.0,
+) -> tuple:
+    """Two-stage loss: CD + voxel-graph Laplacian with Kendall balancing.
+
+    CD provides global reconstruction. Voxel Laplacian provides edge sharpness
+    via a fixed sparse convolution -- gradients flow through features directly,
+    no dynamic graph or kNN needed.
+    """
+    batch_idx = pred.C[:, 0]
+    decoded = pred.C[:, 1:].float()
+    offsets = pred.F
+    refined = decoded + offsets
+
+    unique_batches = batch_idx.unique()
+    n_patches = len(unique_batches)
+
+    # --- CD term (same as dynamic_chamfer_loss) ---
+    total_fwd = 0.0
+    total_rev = 0.0
+    # Collect NN-matched target positions for Laplacian
+    target_positions = torch.empty_like(refined)
+
+    for i, b in enumerate(unique_batches):
+        mask = batch_idx == b
+        refined_b = refined[mask]
+        decoded_b = decoded[mask]
+        orig_b = original_patches[i].to(refined_b.device)
+
+        if orig_b.shape[0] == 0:
+            continue
+
+        dists_sq = torch.cdist(refined_b, orig_b).pow(2)
+        total_fwd += dists_sq.min(dim=1).values.mean()
+        total_rev += dists_sq.min(dim=0).values.mean()
+
+        # NN of decoded in original -> target positions for Laplacian
+        dec_orig_dists = torch.cdist(decoded_b, orig_b)
+        nn_idx = dec_orig_dists.argmin(dim=1)
+        target_positions[mask] = orig_b[nn_idx].detach()
+
+    cd_loss = (fwd_weight * total_fwd + rev_weight * total_rev) / max(n_patches, 1)
+
+    # --- Voxel Laplacian term ---
+    # Build SparseTensors with position features on the decoded grid
+    refined_st = ME.SparseTensor(
+        features=refined,
+        coordinate_map_key=pred.coordinate_map_key,
+        coordinate_manager=pred.coordinate_manager,
+    )
+    target_st = ME.SparseTensor(
+        features=target_positions,
+        coordinate_map_key=pred.coordinate_map_key,
+        coordinate_manager=pred.coordinate_manager,
+    )
+
+    lap_refined = lap_op(refined_st)
+    lap_target = lap_op(target_st)
+    vlap_loss = (lap_refined.F - lap_target.F).pow(2).mean()
+
+    # Kendall auto-balancing
+    total = kendall(cd_loss, vlap_loss)
+
+    extras = {
+        "cd_fwd": float(total_fwd) / max(n_patches, 1) if n_patches > 0 else 0,
+        "cd_rev": float(total_rev) / max(n_patches, 1) if n_patches > 0 else 0,
+        "vlap": vlap_loss.item(),
+        "kw_cd": kendall.weights()[0],
+        "kw_vlap": kendall.weights()[1],
+    }
+    return total, extras
+
+
+def cd_laplacian_loss(
+    pred: ME.SparseTensor,
+    original_patches: list,
+    curvature: torch.Tensor,
+    fwd_weight: float = 1.0,
+    rev_weight: float = 1.0,
+    lambda_lap: float = 1.0,
+    lap_k: int = 8,
+    alpha: float = 3.0,
+) -> tuple:
+    """Composite loss: Chamfer distance + Laplacian preservation.
+
+    CD provides stable global reconstruction. Laplacian explicitly targets
+    oversmoothing by matching refined sharpness to original sharpness.
+    NN mapping for Laplacian targets computed inline from original patches.
+    """
+    batch_idx = pred.C[:, 0]
+    decoded = pred.C[:, 1:].float()
+    offsets = pred.F
+    refined = decoded + offsets
+
+    unique_batches = batch_idx.unique()
+    n_patches = len(unique_batches)
+
+    total_fwd = 0.0
+    total_rev = 0.0
+    total_lap = 0.0
+
+    for i, b in enumerate(unique_batches):
+        mask = batch_idx == b
+        decoded_b = decoded[mask]
+        refined_b = refined[mask]
+        orig_b = original_patches[i].to(refined_b.device)
+        N_b = decoded_b.shape[0]
+
+        if orig_b.shape[0] == 0:
+            continue
+
+        # --- CD term ---
+        dists_sq = torch.cdist(refined_b, orig_b).pow(2)
+        total_fwd += dists_sq.min(dim=1).values.mean()
+        total_rev += dists_sq.min(dim=0).values.mean()
+
+        # --- Laplacian term ---
+        # NN of decoded in original -> target positions
+        dec_orig_dists = torch.cdist(decoded_b, orig_b)
+        nn_idx = dec_orig_dists.argmin(dim=1)
+        target_b = orig_b[nn_idx].detach()
+
+        # kNN graph from decoded positions
+        k = min(lap_k, N_b - 1)
+        dec_self_dists = torch.cdist(
+            decoded_b.unsqueeze(0), decoded_b.unsqueeze(0)
+        ).squeeze(0)
+        _, knn_idx = dec_self_dists.topk(k + 1, dim=1, largest=False)
+        knn_idx = knn_idx[:, 1:]  # exclude self
+
+        # Laplacian = point - mean(neighbors)
+        lap_ref = refined_b - refined_b[knn_idx].mean(dim=1)
+        lap_tgt = target_b - target_b[knn_idx].mean(dim=1)
+
+        curv_b = curvature[mask]
+        curv_w = 1.0 + alpha * curv_b
+        lap_diff = torch.abs(lap_ref - lap_tgt)
+        total_lap += (curv_w.unsqueeze(-1) * lap_diff).mean()
+
+    n = max(n_patches, 1)
+    cd_loss = (fwd_weight * total_fwd + rev_weight * total_rev) / n
+    lap_loss = total_lap / n
+    loss = cd_loss + lambda_lap * lap_loss
+
+    extras = {
+        "cd_fwd": float(total_fwd) / n,
+        "cd_rev": float(total_rev) / n,
+        "lap": float(lap_loss),
+    }
+    return loss, extras
+
+
+def focal_chamfer_loss(
+    pred: ME.SparseTensor,
+    original_patches: list,
+    fwd_weight: float = 1.0,
+    rev_weight: float = 1.0,
+    focal_gamma: float = 2.0,
+) -> tuple:
+    """Chamfer distance with focal weighting -- hard examples get more gradient.
+
+    Points with higher CD error (naturally edges) are upweighted by
+    (error / max_error)^gamma. Weights are detached so they only modulate
+    loss magnitude, not gradient direction.
+    """
+    batch_idx = pred.C[:, 0]
+    decoded = pred.C[:, 1:].float()
+    offsets = pred.F
+    refined = decoded + offsets
+
+    unique_batches = batch_idx.unique()
+    n_patches = len(unique_batches)
+
+    total_fwd = 0.0
+    total_rev = 0.0
+
+    for i, b in enumerate(unique_batches):
+        mask = batch_idx == b
+        refined_b = refined[mask]
+        orig_b = original_patches[i].to(refined_b.device)
+
+        if orig_b.shape[0] == 0:
+            continue
+
+        dists_sq = torch.cdist(refined_b, orig_b).pow(2)
+
+        # Forward: each refined -> nearest orig
+        fwd_min_sq = dists_sq.min(dim=1).values
+        fwd_max = fwd_min_sq.detach().max().clamp(min=1e-8)
+        fwd_w = (fwd_min_sq.detach() / fwd_max).pow(focal_gamma)
+        total_fwd += (fwd_w * fwd_min_sq).mean()
+
+        # Reverse: each orig -> nearest refined
+        rev_min_sq = dists_sq.min(dim=0).values
+        rev_max = rev_min_sq.detach().max().clamp(min=1e-8)
+        rev_w = (rev_min_sq.detach() / rev_max).pow(focal_gamma)
+        total_rev += (rev_w * rev_min_sq).mean()
+
+    loss = (fwd_weight * total_fwd + rev_weight * total_rev) / max(n_patches, 1)
+    extras = {
+        "cd_fwd": float(total_fwd) / max(n_patches, 1) if n_patches > 0 else 0,
+        "cd_rev": float(total_rev) / max(n_patches, 1) if n_patches > 0 else 0,
+    }
+    return loss, extras
+
+
+def edge_gated_chamfer_loss(
+    pred: ME.SparseTensor,
+    original_patches: list,
+    curvature: torch.Tensor,
+    fwd_weight: float = 1.0,
+    rev_weight: float = 1.0,
+    lambda_flat: float = 1.0,
+    edge_beta: float = 10.0,
+    edge_tau: float = 0.33,
+) -> tuple:
+    """Chamfer distance with edge-gated forward/reverse and flat displacement penalty.
+
+    Curvature is normalized per-patch to [0,1] so gating is consistent across
+    clouds and rates. Forward CD weighted by edge gate. Reverse CD weighted by
+    gate of the nearest refined point (focus coverage on edge originals).
+    Flat penalty suppresses displacement where curvature is low.
+    """
+    batch_idx = pred.C[:, 0]
+    decoded = pred.C[:, 1:].float()
+    offsets = pred.F
+    refined = decoded + offsets
+
+    unique_batches = batch_idx.unique()
+    n_patches = len(unique_batches)
+
+    total_fwd = 0.0
+    total_rev = 0.0
+    # Collect per-patch gates for flat penalty
+    all_w = torch.empty_like(curvature)
+
+    for i, b in enumerate(unique_batches):
+        mask = batch_idx == b
+        refined_b = refined[mask]
+        orig_b = original_patches[i].to(refined_b.device)
+        curv_b = curvature[mask]
+
+        # Per-patch curvature normalization to [0,1]
+        c_min = curv_b.min()
+        c_max = curv_b.max()
+        c_range = (c_max - c_min).clamp(min=1e-8)
+        curv_norm = (curv_b - c_min) / c_range
+
+        w_b = torch.sigmoid(edge_beta * (curv_norm - edge_tau))
+        all_w[mask] = w_b
+
+        if orig_b.shape[0] == 0:
+            continue
+
+        dists_sq = torch.cdist(refined_b, orig_b).pow(2)
+
+        # Forward: each refined -> nearest orig, edge-weighted
+        fwd_min_sq = dists_sq.min(dim=1).values  # (N_b,)
+        total_fwd += (w_b * fwd_min_sq).mean()
+
+        # Reverse: unweighted -- all original points should be covered
+        rev_min_sq = dists_sq.min(dim=0).values  # (M_b,)
+        total_rev += rev_min_sq.mean()
+
+    cd_loss = (fwd_weight * total_fwd + rev_weight * total_rev) / max(n_patches, 1)
+
+    # Flat displacement penalty: penalize movement where curvature is low
+    flat_penalty = ((1.0 - all_w) * offsets.pow(2).sum(dim=-1)).mean()
+
+    loss = cd_loss + lambda_flat * flat_penalty
+
+    edge_pct = (all_w > 0.5).float().mean().item() * 100.0
+    extras = {
+        "cd_fwd": float(total_fwd) / max(n_patches, 1) if n_patches > 0 else 0,
+        "cd_rev": float(total_rev) / max(n_patches, 1) if n_patches > 0 else 0,
+        "flat_penalty": flat_penalty.item(),
+        "edge_pct": edge_pct,
+    }
+    return loss, extras
+
+
+# ---------------------------------------------------------------------------
+# Loss dispatch: typed context + registry of LossFunction objects
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LossContext:
+    """Typed context built from batch data. Passed to every LossFunction."""
+
+    curvature: torch.Tensor = None
+    original_patches: Optional[List[torch.Tensor]] = None
+    gt_displacement: Optional[torch.Tensor] = None
+    input_sparse: Optional[ME.SparseTensor] = None
+    kendall: Optional[KendallUncertaintyWeights] = None
+    lap_op: Optional[VoxelLaplacian] = None
+
+
+class LossFunction:
+    """Base class for all loss functions. Subclass and override __call__."""
+
+    needs_chamfer: bool = False
+    needs_kendall: bool = False
+    needs_lap_op: bool = False
+
+    def __call__(
+        self, pred: ME.SparseTensor, lc, ctx: LossContext
+    ) -> Tuple[torch.Tensor, dict]:
+        raise NotImplementedError
+
+
+class DynamicChamferLoss(LossFunction):
+    needs_chamfer = True
+
+    def __call__(self, pred, lc, ctx):
+        return dynamic_chamfer_loss(
+            pred,
+            ctx.original_patches,
+            fwd_weight=lc.cd_fwd_weight,
+            rev_weight=lc.cd_rev_weight,
+        )
+
+
+class FocalChamferLoss(LossFunction):
+    needs_chamfer = True
+
+    def __call__(self, pred, lc, ctx):
+        return focal_chamfer_loss(
+            pred,
+            ctx.original_patches,
+            fwd_weight=lc.cd_fwd_weight,
+            rev_weight=lc.cd_rev_weight,
+            focal_gamma=lc.focal_gamma,
+        )
+
+
+class EdgeGatedChamferLoss(LossFunction):
+    needs_chamfer = True
+
+    def __call__(self, pred, lc, ctx):
+        return edge_gated_chamfer_loss(
+            pred,
+            ctx.original_patches,
+            ctx.curvature,
+            fwd_weight=lc.cd_fwd_weight,
+            rev_weight=lc.cd_rev_weight,
+            lambda_flat=lc.lambda_flat,
+            edge_beta=lc.edge_beta,
+            edge_tau=lc.edge_tau,
+        )
+
+
+class CDLaplacianLoss(LossFunction):
+    needs_chamfer = True
+
+    def __call__(self, pred, lc, ctx):
+        return cd_laplacian_loss(
+            pred,
+            ctx.original_patches,
+            ctx.curvature,
+            fwd_weight=lc.cd_fwd_weight,
+            rev_weight=lc.cd_rev_weight,
+            lambda_lap=lc.lambda_lap,
+            lap_k=lc.laplacian_k,
+            alpha=lc.alpha,
+        )
+
+
+class CDVoxelLaplacianLoss(LossFunction):
+    needs_chamfer = True
+    needs_kendall = True
+    needs_lap_op = True
+
+    def __call__(self, pred, lc, ctx):
+        return cd_vlap_loss(
+            pred,
+            ctx.original_patches,
+            ctx.lap_op,
+            ctx.kendall,
+            fwd_weight=lc.cd_fwd_weight,
+            rev_weight=lc.cd_rev_weight,
+        )
+
+
+_REGISTRY: Dict[str, LossFunction] = {
+    "cd": DynamicChamferLoss(),
+    "focal_cd": FocalChamferLoss(),
+    "edge_cd": EdgeGatedChamferLoss(),
+    "cd_lap": CDLaplacianLoss(),
+    "cd_vlap": CDVoxelLaplacianLoss(),
+}
+
+
+def get_loss_fn(loss_type: str) -> LossFunction:
+    """Look up a LossFunction by name. Raises ValueError for unknown types."""
+    if loss_type not in _REGISTRY:
+        raise ValueError(
+            f"Unknown loss_type: {loss_type!r}. "
+            f"Available: {sorted(_REGISTRY.keys())}"
+        )
+    return _REGISTRY[loss_type]

@@ -3,10 +3,6 @@
 3-level encoder-decoder with skip connections. Input: 4-ch features per point
 (normalized xyz + curvature). Output: 3-ch displacement vector per point,
 bounded by tanh * max_displacement.
-
-GatedSparseUNet adds a learned move/no-move gate head (1-ch sigmoid) that
-modulates the displacement at inference. The gate is supervised with BCE
-against indicator(||d_gt|| > 0), explicitly modeling the bimodal GT distribution.
 """
 
 import MinkowskiEngine as ME
@@ -139,143 +135,262 @@ class SparseUNet(nn.Module):
         return out
 
 
-class GatedSparseUNet(SparseUNet):
-    """Sparse U-Net with learned move/no-move gate.
+class FiLMGenerator(nn.Module):
+    """Maps rate representation to embedding vector for FiLM conditioning."""
 
-    Inherits encoder-decoder from SparseUNet. Replaces the single head with:
-    - Displacement head: 3-ch, tanh-bounded (same as SparseUNet)
-    - Gate head: 1-ch, sigmoid (move probability per point)
+    def __init__(self, in_dim: int = 1, embed_dim: int = 64):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(embed_dim, embed_dim),
+            nn.ReLU(inplace=True),
+        )
 
-    At inference: d_final = gate * d_pred.
-    During training: displacement loss is NOT gated (all points learn),
-    gate is supervised with BCE against indicator(||d_gt|| > 0).
+    def forward(self, rate: torch.Tensor) -> torch.Tensor:
+        # rate: (B, in_dim) -> (B, embed_dim) or (in_dim,) -> (embed_dim,)
+        return self.mlp(rate)
+
+
+class FiLMResBlock(nn.Module):
+    """ResBlock with FiLM modulation after second norm, before residual add."""
+
+    def __init__(self, channels: int, embed_dim: int = 64):
+        super().__init__()
+        self.conv1 = ME.MinkowskiConvolution(
+            channels, channels, kernel_size=3, stride=1, bias=False, dimension=3
+        )
+        self.bn1 = ME.MinkowskiInstanceNorm(channels)
+        self.conv2 = ME.MinkowskiConvolution(
+            channels, channels, kernel_size=3, stride=1, bias=False, dimension=3
+        )
+        self.bn2 = ME.MinkowskiInstanceNorm(channels)
+        # FiLM projection: embed -> (gamma, beta) per channel
+        self.film_proj = nn.Linear(embed_dim, channels * 2)
+        # Init near identity: small weights, bias = [0,...,0,...] + we add 1 to gamma
+        nn.init.zeros_(self.film_proj.weight)
+        nn.init.zeros_(self.film_proj.bias)
+
+    def forward(self, x, rate_embeds):
+        residual = x
+        out = MF.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        # FiLM: per-point gamma * features + beta
+        gb = self.film_proj(rate_embeds)  # (B, channels*2)
+        C = out.F.shape[1]
+        batch_indices = out.C[:, 0].long()  # sample index per point
+        gb_per_point = gb[batch_indices]  # (N, channels*2)
+        gamma = gb_per_point[:, :C] + 1.0  # +1 for identity init
+        beta = gb_per_point[:, C:]
+        out = ME.SparseTensor(
+            features=gamma * out.F + beta,
+            coordinate_map_key=out.coordinate_map_key,
+            coordinate_manager=out.coordinate_manager,
+        )
+        out = MF.relu(out + residual)
+        return out
+
+
+class FiLMSparseUNet(nn.Module):
+    """SparseUNet with FiLM rate conditioning on all 6 ResBlocks.
+
+    Forward signature: (x, rates) where rates is a (B,) tensor of rate values.
+    Per-point conditioning via batch indices from sparse tensor coordinates.
+    At init, FiLM starts as identity so behavior matches vanilla SparseUNet.
+
+    rate_repr: "onehot" (7-dim, legacy), "bpp" (1-dim continuous bpp scalar)
     """
 
-    def __init__(self, in_channels: int = 4, max_displacement: float = 5.0):
-        super().__init__(in_channels=in_channels, max_displacement=max_displacement)
-        # Replace parent's single head with two heads
-        # Displacement head (reuse parent's conv_out and tanh)
-        # Gate head
-        self.conv_gate = ME.MinkowskiConvolution(
-            32, 1, kernel_size=1, stride=1, bias=True, dimension=3
+    MAX_RATE = 7  # r1-r7 (for onehot backward compat)
+
+    def __init__(
+        self,
+        in_channels: int = 4,
+        max_displacement: float = 5.0,
+        film_embed_dim: int = 64,
+        rate_repr: str = "onehot",
+    ):
+        super().__init__()
+        self.max_displacement = max_displacement
+        self.rate_repr = rate_repr
+
+        # FiLM generator
+        if rate_repr == "onehot":
+            rate_in_dim = self.MAX_RATE
+        else:
+            rate_in_dim = 1
+        self.film_gen = FiLMGenerator(rate_in_dim, film_embed_dim)
+
+        # Encoder
+        self.conv_in = ME.MinkowskiConvolution(
+            in_channels, 32, kernel_size=3, stride=1, bias=False, dimension=3
         )
-        self.sigmoid = ME.MinkowskiSigmoid()
+        self.bn_in = ME.MinkowskiInstanceNorm(32)
+        self.enc_block1 = FiLMResBlock(32, film_embed_dim)
 
-    def forward(self, x: ME.SparseTensor) -> tuple:
-        # Encoder (inherited layers)
-        e1 = MF.relu(self.bn_in(self.conv_in(x)))
-        e1 = self.enc_block1(e1)
+        self.down1 = ME.MinkowskiConvolution(
+            32, 64, kernel_size=2, stride=2, bias=False, dimension=3
+        )
+        self.bn_down1 = ME.MinkowskiInstanceNorm(64)
+        self.enc_block2 = FiLMResBlock(64, film_embed_dim)
 
-        e2 = MF.relu(self.bn_down1(self.down1(e1)))
-        e2 = self.enc_block2(e2)
-
-        e3 = MF.relu(self.bn_down2(self.down2(e2)))
-        e3 = self.enc_block3(e3)
+        self.down2 = ME.MinkowskiConvolution(
+            64, 128, kernel_size=2, stride=2, bias=False, dimension=3
+        )
+        self.bn_down2 = ME.MinkowskiInstanceNorm(128)
+        self.enc_block3 = FiLMResBlock(128, film_embed_dim)
 
         # Bottleneck
-        b = self.bottleneck(e3)
+        self.bottleneck = FiLMResBlock(128, film_embed_dim)
+
+        # Decoder
+        self.up2 = ME.MinkowskiConvolutionTranspose(
+            128, 64, kernel_size=2, stride=2, bias=False, dimension=3
+        )
+        self.bn_up2 = ME.MinkowskiInstanceNorm(64)
+        self.dec_merge2 = ME.MinkowskiConvolution(
+            128, 64, kernel_size=1, stride=1, bias=False, dimension=3
+        )
+        self.bn_merge2 = ME.MinkowskiInstanceNorm(64)
+        self.dec_block2 = FiLMResBlock(64, film_embed_dim)
+
+        self.up1 = ME.MinkowskiConvolutionTranspose(
+            64, 32, kernel_size=2, stride=2, bias=False, dimension=3
+        )
+        self.bn_up1 = ME.MinkowskiInstanceNorm(32)
+        self.dec_merge1 = ME.MinkowskiConvolution(
+            64, 32, kernel_size=1, stride=1, bias=False, dimension=3
+        )
+        self.bn_merge1 = ME.MinkowskiInstanceNorm(32)
+        self.dec_block1 = FiLMResBlock(32, film_embed_dim)
+
+        # Head
+        self.conv_out = ME.MinkowskiConvolution(
+            32, 3, kernel_size=1, stride=1, bias=True, dimension=3
+        )
+        self.tanh = ME.MinkowskiTanh()
+
+    def _rate_to_input(self, rates: torch.Tensor) -> torch.Tensor:
+        """Convert rate tensor (B,) to model input representation.
+
+        For onehot: rates are N/7.0 values -> 7-dim onehot.
+        For bpp: rates are raw bpp scalars -> (B, 1).
+        """
+        if rates.dim() == 0:
+            rates = rates.unsqueeze(0)
+        B = rates.shape[0]
+        if self.rate_repr == "onehot":
+            indices = (rates * self.MAX_RATE).round().long() - 1  # 0-indexed
+            onehot = torch.zeros(B, self.MAX_RATE, device=rates.device)
+            onehot.scatter_(1, indices.unsqueeze(1), 1.0)
+            return onehot  # (B, 7)
+        return rates.unsqueeze(1)  # (B, 1) -- bpp or scalar
+
+    def forward(self, x: ME.SparseTensor, rates: torch.Tensor) -> ME.SparseTensor:
+        rate_input = self._rate_to_input(rates)  # (B, in_dim)
+        rate_embeds = self.film_gen(rate_input)  # (B, embed_dim)
+
+        # Encoder
+        e1 = MF.relu(self.bn_in(self.conv_in(x)))
+        e1 = self.enc_block1(e1, rate_embeds)
+
+        e2 = MF.relu(self.bn_down1(self.down1(e1)))
+        e2 = self.enc_block2(e2, rate_embeds)
+
+        e3 = MF.relu(self.bn_down2(self.down2(e2)))
+        e3 = self.enc_block3(e3, rate_embeds)
+
+        # Bottleneck
+        b = self.bottleneck(e3, rate_embeds)
 
         # Decoder level 2
         d2 = MF.relu(self.bn_up2(self.up2(b)))
         d2 = ME.cat(d2, e2)
         d2 = MF.relu(self.bn_merge2(self.dec_merge2(d2)))
-        d2 = self.dec_block2(d2)
+        d2 = self.dec_block2(d2, rate_embeds)
 
         # Decoder level 1
         d1 = MF.relu(self.bn_up1(self.up1(d2)))
         d1 = ME.cat(d1, e1)
         d1 = MF.relu(self.bn_merge1(self.dec_merge1(d1)))
-        d1 = self.dec_block1(d1)
+        d1 = self.dec_block1(d1, rate_embeds)
 
-        # Displacement head
-        disp = self.tanh(self.conv_out(d1))
-        disp = ME.SparseTensor(
-            features=disp.F * self.max_displacement,
-            coordinate_map_key=disp.coordinate_map_key,
-            coordinate_manager=disp.coordinate_manager,
+        # Head
+        out = self.tanh(self.conv_out(d1))
+        out = ME.SparseTensor(
+            features=out.F * self.max_displacement,
+            coordinate_map_key=out.coordinate_map_key,
+            coordinate_manager=out.coordinate_manager,
         )
 
-        # Gate head
-        gate = self.sigmoid(self.conv_gate(d1))
-
-        return disp, gate
+        return out
 
 
-class ThresholdGatedUNet(SparseUNet):
-    """Sparse U-Net with learned magnitude thresholding.
+class FiLMHeadSparseUNet(SparseUNet):
+    """SparseUNet with FiLM conditioning at output head only.
 
-    Instead of a separate gate classification head (which suffers from
-    MTL gradient conflict with the displacement head), the gate derives
-    from the displacement prediction itself:
+    Vanilla backbone learns rate-invariant geometry (WHERE to move points).
+    Output scalar scaling learns rate-dependent magnitude (HOW MUCH to move).
+    Eliminates gradient interference from mixed-rate batches in shared backbone.
 
-        gate = sigmoid(k * (||d_pred|| - theta))
-
-    where theta is a per-point adaptive threshold predicted by a small MLP
-    on the decoder features, and k is a learnable sharpness parameter.
-    No separate classification loss needed -- the gate is fully determined
-    by the displacement magnitude, eliminating gradient conflict.
+    Forward signature: (x, rates) where rates is a (B,) tensor of rate values.
+    rate_repr: "onehot" (7-dim, legacy), "bpp" (1-dim continuous bpp scalar)
     """
 
-    def __init__(self, in_channels: int = 4, max_displacement: float = 5.0):
+    MAX_RATE = 7  # for onehot backward compat
+
+    def __init__(
+        self,
+        in_channels: int = 4,
+        max_displacement: float = 5.0,
+        film_embed_dim: int = 64,
+        rate_repr: str = "onehot",
+    ):
         super().__init__(in_channels=in_channels, max_displacement=max_displacement)
-        # Threshold head: predicts per-point threshold from decoder features
-        self.threshold_head = nn.Sequential(
-            ME.MinkowskiLinear(32, 16, bias=True),
-            ME.MinkowskiReLU(),
-            ME.MinkowskiLinear(16, 1, bias=True),
+        self.rate_repr = rate_repr
+
+        # Rate -> scalar scale factor
+        if rate_repr == "onehot":
+            rate_in_dim = self.MAX_RATE
+        else:
+            rate_in_dim = 1
+        self.scale_net = nn.Sequential(
+            nn.Linear(rate_in_dim, film_embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(film_embed_dim, 1),
         )
-        # Init final bias ~0.25 (median nonzero GT displacement magnitude)
-        # so gate starts near 50/50 rather than passing everything through
-        self.threshold_head[-1].linear.bias.data.fill_(0.25)
-        # Learnable sharpness (init ~10 for moderately sharp sigmoid)
-        self.log_k = nn.Parameter(torch.tensor(2.3))  # exp(2.3) ~ 10
+        # Init bias so scale starts at 1.0 (identity)
+        nn.init.zeros_(self.scale_net[0].weight)
+        nn.init.zeros_(self.scale_net[0].bias)
+        nn.init.zeros_(self.scale_net[2].weight)
+        self.scale_net[2].bias.data.fill_(1.0)
 
-    def forward(self, x: ME.SparseTensor) -> tuple:
-        # Encoder (inherited layers)
-        e1 = MF.relu(self.bn_in(self.conv_in(x)))
-        e1 = self.enc_block1(e1)
+    def _rate_to_input(self, rates: torch.Tensor) -> torch.Tensor:
+        if rates.dim() == 0:
+            rates = rates.unsqueeze(0)
+        B = rates.shape[0]
+        if self.rate_repr == "onehot":
+            indices = (rates * self.MAX_RATE).round().long() - 1
+            onehot = torch.zeros(B, self.MAX_RATE, device=rates.device)
+            onehot.scatter_(1, indices.unsqueeze(1), 1.0)
+            return onehot
+        return rates.unsqueeze(1)
 
-        e2 = MF.relu(self.bn_down1(self.down1(e1)))
-        e2 = self.enc_block2(e2)
+    def forward(self, x: ME.SparseTensor, rates: torch.Tensor) -> ME.SparseTensor:
+        # Vanilla backbone forward
+        out = super().forward(x)
 
-        e3 = MF.relu(self.bn_down2(self.down2(e2)))
-        e3 = self.enc_block3(e3)
+        # Rate-dependent scalar scaling per sample
+        rate_input = self._rate_to_input(rates)  # (B, in_dim)
+        scale = self.scale_net(rate_input)  # (B, 1)
 
-        # Bottleneck
-        b = self.bottleneck(e3)
+        # Apply per-point scaling via batch indices
+        batch_indices = out.C[:, 0].long()
+        scale_per_point = scale[batch_indices]  # (N, 1)
 
-        # Decoder level 2
-        d2 = MF.relu(self.bn_up2(self.up2(b)))
-        d2 = ME.cat(d2, e2)
-        d2 = MF.relu(self.bn_merge2(self.dec_merge2(d2)))
-        d2 = self.dec_block2(d2)
-
-        # Decoder level 1
-        d1 = MF.relu(self.bn_up1(self.up1(d2)))
-        d1 = ME.cat(d1, e1)
-        d1 = MF.relu(self.bn_merge1(self.dec_merge1(d1)))
-        d1 = self.dec_block1(d1)
-
-        # Displacement head
-        disp = self.tanh(self.conv_out(d1))
-        disp = ME.SparseTensor(
-            features=disp.F * self.max_displacement,
-            coordinate_map_key=disp.coordinate_map_key,
-            coordinate_manager=disp.coordinate_manager,
+        out = ME.SparseTensor(
+            features=out.F * scale_per_point,
+            coordinate_map_key=out.coordinate_map_key,
+            coordinate_manager=out.coordinate_manager,
         )
-
-        # Threshold gate: sigmoid(k * (||disp|| - theta))
-        theta_sparse = self.threshold_head(d1)
-        theta = theta_sparse.F.squeeze(-1)  # (N,)
-        magnitude = disp.F.norm(dim=-1)  # (N,)
-        k = torch.exp(self.log_k)
-        gate_vals = torch.sigmoid(k * (magnitude - theta))  # (N,)
-
-        # Pack gate as SparseTensor for consistent interface
-        gate = ME.SparseTensor(
-            features=gate_vals.unsqueeze(-1),
-            coordinate_map_key=disp.coordinate_map_key,
-            coordinate_manager=disp.coordinate_manager,
-        )
-
-        return disp, gate
+        return out
