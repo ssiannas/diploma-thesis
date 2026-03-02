@@ -38,6 +38,14 @@ def parse_args():
     )
     p.add_argument("--sequence", type=str, default="redandblack_vox10_1550")
     p.add_argument("--rate", type=str, default="r7")
+    p.add_argument(
+        "--refined",
+        type=str,
+        default=None,
+        help="Path or suffix for refined cloud. If a path, used directly. "
+        "If a suffix like 'film_r2', loads refined_film_r2.npy. "
+        "Default: refined_{rate}.npy",
+    )
     p.add_argument("--curvature_k", type=int, default=30)
     p.add_argument("--peak", type=float, default=1023.0)
     return p.parse_args()
@@ -66,7 +74,12 @@ def main():
     # Load clouds
     original = np.load(seq_dir / "original.npy").astype(np.float32)
     decoded = np.load(seq_dir / f"pcgcv2_{args.rate}.npy").astype(np.float32)
-    refined_path = seq_dir / f"refined_{args.rate}.npy"
+    if args.refined is None:
+        refined_path = seq_dir / f"refined_{args.rate}.npy"
+    elif "/" in args.refined or args.refined.endswith(".npy"):
+        refined_path = Path(args.refined)
+    else:
+        refined_path = seq_dir / f"refined_{args.refined}.npy"
 
     if not refined_path.exists():
         logger.error(f"Refined cloud not found: {refined_path}")
