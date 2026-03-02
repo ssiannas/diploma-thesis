@@ -13,14 +13,26 @@ htmlcov/
 build/
 dist/
 
-# Claude Code files (tracked)
+# AI assistant files
 .claude/
 CLAUDE*
 **claude**
 **chatgpt**
+**gpt**
 
-# Development docs (local tracking only)
+# Development docs (local only)
 .docs/
+
+# Stale guide/status files
+QUICK_START.md
+QUICKSTART.md
+RESTART_GUIDE.md
+REVIEW_SUMMARY.md
+STATUS.md
+NEXT_STEPS*.md
+MODEL_DOWNLOAD_NOTE.md
+METRICS_RATIONALE.md
+scripts/download_models_instructions.md
 
 # Virtual environments
 thesis_env/
@@ -59,7 +71,6 @@ models/final/*
 !models/baselines/.gitkeep
 !models/pretrained/.gitkeep
 !models/final/.gitkeep
-!models/**/README.md
 *.pth
 *.pkl
 *.h5
