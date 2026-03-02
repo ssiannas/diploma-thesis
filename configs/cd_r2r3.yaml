@@ -1,0 +1,10 @@
+# Chamfer Distance loss, multi-rate r2+r3
+data:
+  rates: [r2, r3]
+  frame_stride: 12
+
+loss:
+  loss_type: cd
+
+lr: 1e-3
+epochs: 30

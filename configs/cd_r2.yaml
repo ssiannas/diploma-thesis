@@ -1,0 +1,10 @@
+# Chamfer Distance loss, rate 2 -- proven best configuration
+data:
+  rates: [r2]
+  frame_stride: 12
+
+loss:
+  loss_type: cd
+
+lr: 1e-3
+epochs: 30

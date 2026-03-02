@@ -1,0 +1,38 @@
+# PROVEN: Output-only FiLM v5 (scalar magnitude scaling), r2+r3
+# Results (54 clouds, mixed-rate batches via RateBalancedBatchSampler):
+#   r2 avg: edge +1.38 dB, flat +0.98 dB, degradation -0.39 dB
+#   r3 avg: edge +0.83 dB, flat +0.73 dB, degradation -0.09 dB
+# Checkpoint: good_candidates/cd_film_v5_r2_r3.pt (epoch 18, val_loss=3.1501)
+#
+# Per-sequence r2: redandblack +1.58/+0.92, soldier +1.46/+1.11,
+#                  loot +1.21/+0.80, longdress +1.25/+1.09
+# Per-sequence r3: redandblack +0.99/+0.71, soldier +0.86/+0.75,
+#                  loot +0.69/+0.71, longdress +0.76/+0.75
+#
+# Notes:
+#   - Beats deep FiLM v3 at r2 (+1.38 vs +1.27 edge), matches at r3
+#   - Vanilla backbone + rate-dependent scalar output scaling
+#   - Mixed-rate batches work cleanly (no gradient interference)
+#   - Overfitting gap: 0.15 (much less than v3's 0.39)
+#   - Best at epoch 18 (vs v3's epoch 7) -- more stable optimization
+#   - Scale net learns rate differentiation: r2 pred_abs=0.28, r3=0.27
+#
+# NEXT: Replace onehot with continuous bpp for arbitrary-rate generalization
+data:
+  rates: [r2, r3]
+  frame_stride: 12
+  augment: true
+  use_curvature: false
+
+model:
+  model_type: film_head
+  film_rate_repr: onehot
+
+loss:
+  loss_type: cd
+
+batch_size: 40
+lr: 5e-4
+weight_decay: 1e-4
+warmup_epochs: 3
+epochs: 30

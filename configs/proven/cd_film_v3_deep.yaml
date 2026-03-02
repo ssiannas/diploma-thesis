@@ -1,0 +1,32 @@
+# PROVEN: Deep FiLM v3, r2+r3 (per-layer FiLM modulation)
+# Results (50 clouds, single-rate batches via RateStratifiedBatchSampler):
+#   r2 avg: edge +1.27 dB, flat +0.86 dB, degradation -0.41 dB
+#   r3 avg: edge +0.84 dB, flat +0.68 dB, degradation -0.17 dB
+# Checkpoint: good_candidates/ (missing -- was film_v3/best_r2_r3.pt)
+#
+# Notes:
+#   - Deep FiLM: gamma/beta modulation at all 6 ResBlocks
+#   - Used RateStratifiedBatchSampler (single-rate batches), NOT mixed batches
+#   - Overfitting gap: 0.39 at convergence (val plateaus epoch 7)
+#   - Deep FiLM fails with mixed-rate batches (v4: gradient interference)
+#   - Best at epoch 7 (val_loss ~3.10)
+data:
+  rates: [r2, r3]
+  frame_stride: 12
+  augment: true
+  use_curvature: false
+
+model:
+  model_type: film
+  film_rate_repr: onehot
+
+loss:
+  loss_type: cd
+
+# NOTE: v3 used default batch_size (16) with RateStratifiedBatchSampler
+batch_size: 16
+lr: 5e-4
+weight_decay: 1e-4
+warmup_epochs: 3
+epochs: 30
+rate_stratified: true

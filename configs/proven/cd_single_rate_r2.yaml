@@ -1,0 +1,26 @@
+# PROVEN: Single-rate CD, r2 only (vanilla backbone)
+# Best single-rate result: avg edge +1.45 dB, flat +0.89 dB
+# Checkpoint: good_candidates/cd_20cloud_s1_r2.pt (20 clouds, epoch ~7)
+#             good_candidates/cd_50cloud_s12_lr1e3_r2.pt (50 clouds, lr=1e-3)
+#
+# Notes:
+#   - No FiLM, no rate conditioning -- single-rate only
+#   - 50-cloud version trained with lr=1e-3 (2x default), frame_stride=12
+#   - Generalizes to r3 (edge +0.67) but degrades at r7 (-0.74 flat)
+data:
+  rates: [r2]
+  frame_stride: 12
+  augment: true
+  use_curvature: false
+
+model:
+  model_type: unet
+
+loss:
+  loss_type: cd
+
+batch_size: 40
+lr: 5e-4
+weight_decay: 1e-4
+warmup_epochs: 3
+epochs: 30
