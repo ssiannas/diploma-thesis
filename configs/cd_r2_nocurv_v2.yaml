@@ -1,0 +1,20 @@
+# Single-rate r2 backbone v2: more data, higher lr
+# For two-stage training: freeze this backbone for FiLM multi-rate
+data:
+  rates: [r2]
+  frame_stride: 12
+  augment: true
+  use_curvature: false
+  max_clouds: 40
+
+model:
+  model_type: unet
+
+loss:
+  loss_type: cd
+
+batch_size: 16
+lr: 1e-3
+weight_decay: 1e-4
+warmup_epochs: 3
+epochs: 30

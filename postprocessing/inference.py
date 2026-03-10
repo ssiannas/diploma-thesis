@@ -15,8 +15,8 @@ import logging
 import MinkowskiEngine as ME
 import numpy as np
 import torch
-from dataset import COORD_SCALE, RATE_BPP, compute_curvature
-from model import FiLMHeadSparseUNet, FiLMSparseUNet, SparseUNet
+from dataset import COORD_SCALE, RATE_BPP, bpp_to_log, compute_curvature
+from model import FiLMHeadSparseUNet, FiLMHeadSparseUNetV2, FiLMSparseUNet, SparseUNet
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,12 +84,19 @@ def main():
     coords_int = np.floor(decoded).astype(np.int32)
 
     in_ch = 3 if no_curv else 4
-    is_film = model_type in ("film", "film_head")
+    is_film = model_type in ("film", "film_head", "film_head_v2")
     if is_film:
         model_cfg = ckpt_cfg.get("model", {}) if "config" in ckpt else {}
         film_embed_dim = model_cfg.get("film_embed_dim", 64)
         film_rate_repr = model_cfg.get("film_rate_repr", "scalar")
-        if model_type == "film_head":
+        if model_type == "film_head_v2":
+            model = FiLMHeadSparseUNetV2(
+                in_channels=in_ch,
+                max_displacement=max_disp,
+                film_embed_dim=film_embed_dim,
+                rate_repr=film_rate_repr,
+            ).to(device)
+        elif model_type == "film_head":
             model = FiLMHeadSparseUNet(
                 in_channels=in_ch,
                 max_displacement=max_disp,
@@ -124,7 +131,7 @@ def main():
                     "FiLM model requires --rate (could not auto-detect from filename)"
                 )
         if film_rate_repr == "bpp":
-            rate_scalar = RATE_BPP[rate_str]
+            rate_scalar = bpp_to_log(RATE_BPP[rate_str])
         else:
             rate_scalar = float(rate_str[1:]) / 7.0
         rate_tensor = torch.tensor([rate_scalar], dtype=torch.float32, device=device)

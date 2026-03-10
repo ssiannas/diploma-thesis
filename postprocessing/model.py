@@ -5,10 +5,26 @@
 bounded by tanh * max_displacement.
 """
 
+import math
+
 import MinkowskiEngine as ME
 import MinkowskiEngine.MinkowskiFunctional as MF
 import torch
 import torch.nn as nn
+
+FOURIER_L = 4  # number of Fourier frequency bands -> 2*L features
+
+
+def _fourier_encode(t: torch.Tensor) -> torch.Tensor:
+    """Positional encoding of a scalar: [sin(pi*2^k*t), cos(pi*2^k*t)] k=0..L-1.
+
+    t: (B,) log-bpp values -> (B, 2*FOURIER_L) features.
+    """
+    if t.dim() == 0:
+        t = t.unsqueeze(0)
+    freqs = 2.0 ** torch.arange(FOURIER_L, dtype=t.dtype, device=t.device)  # (L,)
+    args = math.pi * freqs.unsqueeze(0) * t.unsqueeze(1)  # (B, L)
+    return torch.cat([torch.sin(args), torch.cos(args)], dim=1)  # (B, 2L)
 
 
 class ResBlock(nn.Module):
@@ -97,7 +113,9 @@ class SparseUNet(nn.Module):
         )
         self.tanh = ME.MinkowskiTanh()
 
-    def forward(self, x: ME.SparseTensor) -> ME.SparseTensor:
+    def forward(
+        self, x: ME.SparseTensor, return_pre_head: bool = False
+    ) -> ME.SparseTensor:
         # Encoder
         e1 = MF.relu(self.bn_in(self.conv_in(x)))
         e1 = self.enc_block1(e1)
@@ -122,6 +140,9 @@ class SparseUNet(nn.Module):
         d1 = ME.cat(d1, e1)
         d1 = MF.relu(self.bn_merge1(self.dec_merge1(d1)))
         d1 = self.dec_block1(d1)
+
+        if return_pre_head:
+            return d1  # (N, 32) SparseTensor before conv_out
 
         # Head
         out = self.tanh(self.conv_out(d1))
@@ -217,6 +238,8 @@ class FiLMSparseUNet(nn.Module):
         # FiLM generator
         if rate_repr == "onehot":
             rate_in_dim = self.MAX_RATE
+        elif rate_repr == "fourier":
+            rate_in_dim = 2 * FOURIER_L
         else:
             rate_in_dim = 1
         self.film_gen = FiLMGenerator(rate_in_dim, film_embed_dim)
@@ -274,7 +297,8 @@ class FiLMSparseUNet(nn.Module):
         """Convert rate tensor (B,) to model input representation.
 
         For onehot: rates are N/7.0 values -> 7-dim onehot.
-        For bpp: rates are raw bpp scalars -> (B, 1).
+        For bpp: rates are log-bpp scalars -> (B, 1).
+        For fourier: rates are log-bpp scalars -> (B, 2*FOURIER_L).
         """
         if rates.dim() == 0:
             rates = rates.unsqueeze(0)
@@ -284,6 +308,8 @@ class FiLMSparseUNet(nn.Module):
             onehot = torch.zeros(B, self.MAX_RATE, device=rates.device)
             onehot.scatter_(1, indices.unsqueeze(1), 1.0)
             return onehot  # (B, 7)
+        if self.rate_repr == "fourier":
+            return _fourier_encode(rates)  # (B, 2*FOURIER_L)
         return rates.unsqueeze(1)  # (B, 1) -- bpp or scalar
 
     def forward(self, x: ME.SparseTensor, rates: torch.Tensor) -> ME.SparseTensor:
@@ -326,6 +352,88 @@ class FiLMSparseUNet(nn.Module):
         return out
 
 
+class FiLMHeadSparseUNetV2(SparseUNet):
+    """SparseUNet with per-channel FiLM conditioning on pre-head 32-ch features.
+
+    Applies gamma+beta (per channel) on the 32-ch backbone features before the
+    final 1x1 conv projection to displacement. The backbone stays rate-invariant
+    (no rate-dependent gradients in shared weights); only the FiLM head is
+    rate-conditioned.
+
+    This addresses the scalar bottleneck in FiLMHeadSparseUNet: instead of
+    uniformly scaling all 32 channels by one number, the head can independently
+    modulate each feature channel per rate.
+
+    Forward signature: (x, rates) where rates is a (B,) tensor of log-bpp values.
+    """
+
+    MAX_RATE = 7
+
+    def __init__(
+        self,
+        in_channels: int = 4,
+        max_displacement: float = 5.0,
+        film_embed_dim: int = 64,
+        rate_repr: str = "bpp",
+    ):
+        super().__init__(in_channels=in_channels, max_displacement=max_displacement)
+        self.rate_repr = rate_repr
+
+        if rate_repr == "onehot":
+            rate_in_dim = self.MAX_RATE
+        elif rate_repr == "fourier":
+            rate_in_dim = 2 * FOURIER_L
+        else:
+            rate_in_dim = 1
+
+        self.rate_encoder = nn.Sequential(
+            nn.Linear(rate_in_dim, film_embed_dim),
+            nn.ReLU(inplace=True),
+        )
+        # Outputs gamma (32) + beta (32) for the 32-ch pre-head features
+        self.film_head = nn.Linear(film_embed_dim, 64)
+        nn.init.zeros_(self.film_head.weight)
+        nn.init.zeros_(self.film_head.bias)
+        # gamma starts at 1.0 (add in forward), beta starts at 0.0
+
+    def _rate_to_input(self, rates: torch.Tensor) -> torch.Tensor:
+        if rates.dim() == 0:
+            rates = rates.unsqueeze(0)
+        B = rates.shape[0]
+        if self.rate_repr == "onehot":
+            indices = (rates * self.MAX_RATE).round().long() - 1
+            onehot = torch.zeros(B, self.MAX_RATE, device=rates.device)
+            onehot.scatter_(1, indices.unsqueeze(1), 1.0)
+            return onehot
+        if self.rate_repr == "fourier":
+            return _fourier_encode(rates)
+        return rates.unsqueeze(1)
+
+    def forward(self, x: ME.SparseTensor, rates: torch.Tensor) -> ME.SparseTensor:
+        d1 = super().forward(x, return_pre_head=True)  # (N, 32)
+
+        rate_input = self._rate_to_input(rates)
+        rate_embed = self.rate_encoder(rate_input)  # (B, embed_dim)
+        gb = self.film_head(rate_embed)  # (B, 64)
+        gamma = gb[:, :32] + 1.0  # (B, 32) identity init
+        beta = gb[:, 32:]  # (B, 32) zero init
+
+        batch_idx = d1.C[:, 0].long()
+        d1_mod = ME.SparseTensor(
+            features=gamma[batch_idx] * d1.F + beta[batch_idx],
+            coordinate_map_key=d1.coordinate_map_key,
+            coordinate_manager=d1.coordinate_manager,
+        )
+
+        out = self.tanh(self.conv_out(d1_mod))
+        out = ME.SparseTensor(
+            features=out.F * self.max_displacement,
+            coordinate_map_key=out.coordinate_map_key,
+            coordinate_manager=out.coordinate_manager,
+        )
+        return out
+
+
 class FiLMHeadSparseUNet(SparseUNet):
     """SparseUNet with FiLM conditioning at output head only.
 
@@ -352,6 +460,8 @@ class FiLMHeadSparseUNet(SparseUNet):
         # Rate -> scalar scale factor
         if rate_repr == "onehot":
             rate_in_dim = self.MAX_RATE
+        elif rate_repr == "fourier":
+            rate_in_dim = 2 * FOURIER_L
         else:
             rate_in_dim = 1
         self.scale_net = nn.Sequential(
@@ -374,6 +484,8 @@ class FiLMHeadSparseUNet(SparseUNet):
             onehot = torch.zeros(B, self.MAX_RATE, device=rates.device)
             onehot.scatter_(1, indices.unsqueeze(1), 1.0)
             return onehot
+        if self.rate_repr == "fourier":
+            return _fourier_encode(rates)  # (B, 2*FOURIER_L)
         return rates.unsqueeze(1)
 
     def forward(self, x: ME.SparseTensor, rates: torch.Tensor) -> ME.SparseTensor:

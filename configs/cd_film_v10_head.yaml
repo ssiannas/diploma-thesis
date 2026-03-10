@@ -1,0 +1,26 @@
+# FiLM v10: per-channel head FiLM (gamma+beta on 32-ch features) + rate weighting
+# vs v9 (full FiLM, flat loss): backbone stays rate-invariant, only the
+# per-channel head is rate-conditioned. Static loss weighting reduces r6
+# gradient influence on the shared backbone.
+# Primary validation: cd_fwd must decrease (was flat in v9).
+data:
+  rates: [r2, r4, r6]
+  frame_stride: 12
+  augment: true
+  use_curvature: true
+  rate_jitter: 0.0
+
+model:
+  model_type: film_head_v2
+  film_rate_repr: bpp
+  film_embed_dim: 64
+
+loss:
+  loss_type: cd
+  rate_weights: [1.0, 0.3, 0.05]
+
+batch_size: 42
+lr: 5e-4
+weight_decay: 1e-4
+warmup_epochs: 3
+epochs: 30

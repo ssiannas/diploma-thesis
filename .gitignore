@@ -64,19 +64,18 @@ datasets/**/*.bin
 !datasets/8iVFB_small/
 !datasets/ModelNet40_processed/
 
-# Model checkpoints (everything except directory structure docs)
-models/baselines/*
-models/pretrained/*
-models/final/*
-!models/baselines/.gitkeep
-!models/pretrained/.gitkeep
-!models/final/.gitkeep
+# Model checkpoints
+models/
+*.pt
 *.pth
 *.pkl
 *.h5
 *.ckpt
 *.weights
 *.pb
+
+# Logs
+logs/
 
 # Framework-specific models (pretrained weights, stored on shared drive)
 frameworks/**/models/

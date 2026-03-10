@@ -24,6 +24,7 @@ class DataConfig:
     augment: bool = True
     use_curvature: bool = True
     overfit: bool = False
+    rate_jitter: float = 0.0  # std of Gaussian noise on log(bpp) during training
 
 
 @dataclass
@@ -36,7 +37,8 @@ class ModelConfig:
 
 @dataclass
 class LossConfig:
-    loss_type: str = "cd"  # cd | focal_cd | edge_cd | cd_lap | cd_vlap
+    loss_type: str = "cd"  # cd | sw_cd | focal_cd | edge_cd | cd_lap | cd_vlap
+    sw_mode: str = "linear"  # linear | sqrt | log (only for sw_cd)
     chamfer_padding: int = 0  # Phase 12 lesson: padding must be 0
     cd_fwd_weight: float = 1.0
     cd_rev_weight: float = 1.0
@@ -47,6 +49,12 @@ class LossConfig:
     focal_gamma: float = 2.0
     edge_beta: float = 10.0
     edge_tau: float = 0.05
+    # Per-rate loss weighting: order matches data.rates (empty = uniform)
+    rate_weights: List[float] = field(default_factory=list)
+    # Kendall learned rate weighting: replaces static rate_weights when True
+    use_kendall_rates: bool = False
+    # Dynamic detached rate weighting: weights = detach(L_i) / mean, clamped [0.1, 10]
+    use_dynamic_rates: bool = False
 
 
 @dataclass
@@ -58,7 +66,7 @@ class TrainConfig:
     lr: float = 1e-3
     warmup_epochs: int = 5
     epochs: int = 30
-    num_workers: int = 8
+    num_workers: int = -1  # -1 = auto (os.cpu_count())
     device: str = "cuda"
     save_dir: str = "models/postprocessing"
     log_file: Optional[str] = None
@@ -66,6 +74,9 @@ class TrainConfig:
     weight_decay: float = 1e-2
     rate_stratified: bool = False
     encoder_lr_scale: float = 1.0  # 0.1 for stage 2 (freeze encoder)
+    pretrained_backbone: Optional[str] = (
+        None  # path to SparseUNet checkpoint for two-stage
+    )
 
 
 def _coerce_type(value: Any, field_type: type) -> Any:

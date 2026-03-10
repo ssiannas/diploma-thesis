@@ -79,6 +79,8 @@ def dynamic_chamfer_loss(
     original_patches: list,
     fwd_weight: float = 1.0,
     rev_weight: float = 1.0,
+    patch_weights: torch.Tensor = None,
+    return_per_patch: bool = False,
 ) -> tuple:
     """Chamfer distance between refined points and actual original cloud crops.
 
@@ -102,6 +104,8 @@ def dynamic_chamfer_loss(
 
     total_fwd = 0.0
     total_rev = 0.0
+    # batch_idx -> differentiable CD tensor, for Kendall rate weighting
+    patch_cd_by_batch: dict = {}
 
     for i, b in enumerate(unique_batches):
         mask = batch_idx == b
@@ -114,14 +118,20 @@ def dynamic_chamfer_loss(
         dists_sq = torch.cdist(refined_b, orig_b).pow(2)  # (N_b, M_b)
         fwd = dists_sq.min(dim=1).values.mean()  # each refined -> nearest orig
         rev = dists_sq.min(dim=0).values.mean()  # each orig -> nearest refined
-        total_fwd += fwd
-        total_rev += rev
+        w = patch_weights[b.long()].item() if patch_weights is not None else 1.0
+        total_fwd += w * fwd
+        total_rev += w * rev
+        if return_per_patch:
+            patch_cd_by_batch[b.item()] = fwd_weight * fwd + rev_weight * rev
 
     loss = (fwd_weight * total_fwd + rev_weight * total_rev) / max(n_patches, 1)
     extras = {
         "cd_fwd": float(total_fwd) / max(n_patches, 1) if n_patches > 0 else 0,
         "cd_rev": float(total_rev) / max(n_patches, 1) if n_patches > 0 else 0,
     }
+    if return_per_patch and patch_cd_by_batch:
+        # Dict mapping batch_index (int) -> differentiable loss tensor
+        extras["patch_cd_by_batch"] = patch_cd_by_batch
     return loss, extras
 
 
@@ -282,6 +292,80 @@ def cd_laplacian_loss(
     return loss, extras
 
 
+def self_weighted_chamfer_loss(
+    pred: ME.SparseTensor,
+    original_patches: list,
+    fwd_weight: float = 1.0,
+    rev_weight: float = 1.0,
+    sw_mode: str = "linear",
+) -> tuple:
+    """Chamfer distance with self-weighted forward term.
+
+    Each patch's forward CD is weighted by its own detached magnitude,
+    normalized to mean 1.0 across the batch. This creates an implicit
+    higher-order penalty that prioritizes high-error patches (low-rate)
+    without manual hyperparameters.
+
+    sw_mode controls the weighting function applied to per-patch cd_fwd:
+      "linear": w = cd / mean(cd)        -> effective L4 penalty
+      "sqrt":   w = sqrt(cd) / mean(sqrt) -> effective L3 penalty
+      "log":    w = log(1+cd) / mean(log) -> gentle, outlier-robust
+    """
+    batch_idx = pred.C[:, 0]
+    decoded = pred.C[:, 1:].float()
+    offsets = pred.F
+    refined = decoded + offsets
+
+    unique_batches = batch_idx.unique()
+    n_patches = len(unique_batches)
+
+    fwd_per_patch = []
+    rev_per_patch = []
+
+    for i, b in enumerate(unique_batches):
+        mask = batch_idx == b
+        refined_b = refined[mask]
+        orig_b = original_patches[i].to(refined_b.device)
+
+        if orig_b.shape[0] == 0:
+            continue
+
+        dists_sq = torch.cdist(refined_b, orig_b).pow(2)
+        fwd = dists_sq.min(dim=1).values.mean()
+        rev = dists_sq.min(dim=0).values.mean()
+        fwd_per_patch.append(fwd)
+        rev_per_patch.append(rev)
+
+    if not fwd_per_patch:
+        zero = torch.tensor(0.0, device=pred.F.device, requires_grad=True)
+        return zero, {"cd_fwd": 0.0, "cd_rev": 0.0, "sw_std": 0.0}
+
+    fwd_stack = torch.stack(fwd_per_patch)
+    rev_stack = torch.stack(rev_per_patch)
+
+    # Compute self-weights from detached forward CD
+    fwd_detached = fwd_stack.detach()
+    if sw_mode == "sqrt":
+        raw_w = fwd_detached.sqrt()
+    elif sw_mode == "log":
+        raw_w = torch.log1p(fwd_detached)
+    else:  # linear
+        raw_w = fwd_detached
+    mean_w = raw_w.mean().clamp(min=1e-8)
+    weights = raw_w / mean_w  # mean-normalized to 1.0
+
+    weighted_fwd = (weights * fwd_stack).mean()
+    total_rev = rev_stack.mean()
+
+    loss = fwd_weight * weighted_fwd + rev_weight * total_rev
+    extras = {
+        "cd_fwd": fwd_stack.mean().item(),
+        "cd_rev": total_rev.item(),
+        "sw_std": weights.std().item(),
+    }
+    return loss, extras
+
+
 def focal_chamfer_loss(
     pred: ME.SparseTensor,
     original_patches: list,
@@ -426,6 +510,10 @@ class LossContext:
     input_sparse: Optional[ME.SparseTensor] = None
     kendall: Optional[KendallUncertaintyWeights] = None
     lap_op: Optional[VoxelLaplacian] = None
+    patch_weights: Optional[torch.Tensor] = None  # (B,) per-patch loss weights
+    return_per_patch: bool = (
+        False  # if True, DynamicChamferLoss returns patch_cd_losses in extras
+    )
 
 
 class LossFunction:
@@ -450,6 +538,21 @@ class DynamicChamferLoss(LossFunction):
             ctx.original_patches,
             fwd_weight=lc.cd_fwd_weight,
             rev_weight=lc.cd_rev_weight,
+            patch_weights=ctx.patch_weights,
+            return_per_patch=ctx.return_per_patch,
+        )
+
+
+class SelfWeightedChamferLoss(LossFunction):
+    needs_chamfer = True
+
+    def __call__(self, pred, lc, ctx):
+        return self_weighted_chamfer_loss(
+            pred,
+            ctx.original_patches,
+            fwd_weight=lc.cd_fwd_weight,
+            rev_weight=lc.cd_rev_weight,
+            sw_mode=lc.sw_mode,
         )
 
 
@@ -516,6 +619,7 @@ class CDVoxelLaplacianLoss(LossFunction):
 
 _REGISTRY: Dict[str, LossFunction] = {
     "cd": DynamicChamferLoss(),
+    "sw_cd": SelfWeightedChamferLoss(),
     "focal_cd": FocalChamferLoss(),
     "edge_cd": EdgeGatedChamferLoss(),
     "cd_lap": CDLaplacianLoss(),

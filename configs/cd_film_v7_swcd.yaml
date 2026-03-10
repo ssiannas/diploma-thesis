@@ -1,0 +1,23 @@
+# FiLM v7: Self-weighted forward CD with log(bpp) conditioning
+# Same architecture as v6 but loss uses self-weighted forward CD
+# to resolve gradient conflict across rates (r2 "move" vs r6 "don't move")
+data:
+  rates: [r2, r4, r6]
+  frame_stride: 12
+  augment: true
+  use_curvature: false
+  rate_jitter: 0.0
+
+model:
+  model_type: film_head
+  film_rate_repr: bpp
+
+loss:
+  loss_type: sw_cd
+  sw_mode: sqrt  # L3 penalty (gentler than linear/L4)
+
+batch_size: 42
+lr: 4e-4
+weight_decay: 1e-4
+warmup_epochs: 8
+epochs: 30

@@ -1,0 +1,25 @@
+data:
+  rates: [r4, r6]
+  frame_stride: 12
+  augment: true
+  use_curvature: true
+
+model:
+  model_type: film_head_v2
+  film_rate_repr: bpp
+  film_embed_dim: 64
+
+loss:
+  loss_type: cd
+  rate_weights: [1.0, 1.0]
+
+pretrained_backbone: models/postprocessing/good_candidates/film_v10_head_ep24.pt
+save_dir: models/postprocessing/film_v13_finetune
+
+log_file: logs/film_v13_finetune.log
+
+batch_size: 42
+lr: 1e-4
+weight_decay: 1e-4
+warmup_epochs: 2
+epochs: 15

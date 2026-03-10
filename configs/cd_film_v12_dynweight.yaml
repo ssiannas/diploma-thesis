@@ -1,0 +1,25 @@
+# FiLM v12: dynamic detached rate weighting
+# weights = detach(L_i) / mean(L_i), clamped [0.1, 10]
+# r2 naturally gets higher weight (larger CD error), r6 lower
+# No learnable parameters -- pure adaptive scaling
+data:
+  rates: [r2, r4, r6]
+  frame_stride: 12
+  augment: true
+  use_curvature: true
+  rate_jitter: 0.0
+
+model:
+  model_type: film_head_v2
+  film_rate_repr: bpp
+  film_embed_dim: 64
+
+loss:
+  loss_type: cd
+  use_dynamic_rates: true
+
+batch_size: 42
+lr: 5e-4
+weight_decay: 1e-4
+warmup_epochs: 3
+epochs: 30

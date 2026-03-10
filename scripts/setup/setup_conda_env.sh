@@ -168,10 +168,16 @@ elif python -c "import MinkowskiEngine" &>/dev/null; then
 else
     log "Building MinkowskiEngine $ME_VERSION from source..."
 
+    # Ensure openblas headers are available (required for --blas=openblas)
+    if ! ldconfig -p | grep -q libopenblas && command -v apt-get &>/dev/null; then
+        log "Installing libopenblas-dev..."
+        apt-get install -y libopenblas-dev
+    fi
+
     CUDA_HOME=$(find_cuda_home)
     log "Using CUDA_HOME=$CUDA_HOME"
 
-    # Set compiler for CUDA 11.x
+    # Set compiler: CUDA 11.x needs gcc<=10; CUDA 12.x uses system gcc
     if [[ "$CUDA_MAJOR" == "11" ]]; then
         export CC=gcc-10
         export CXX=g++-10
@@ -179,17 +185,30 @@ else
     fi
     export CUDA_HOME
 
+    # Detect GPU compute capability for targeted build
+    ARCH=$(python -c "import torch; cc=torch.cuda.get_device_capability(0); print(f'{cc[0]}.{cc[1]}')" 2>/dev/null || echo "")
+    if [[ -n "$ARCH" ]]; then
+        export TORCH_CUDA_ARCH_LIST="$ARCH"
+        log "Targeting GPU compute capability: $ARCH"
+    fi
+
     # Clone and build
+    # CUDA 12.x: use main branch (has Thrust API fixes); CUDA 11.x: use tagged v0.5.4
     ME_DIR="/tmp/MinkowskiEngine_build"
     if [[ -d "$ME_DIR" ]]; then
         rm -rf "$ME_DIR"
     fi
 
-    git clone --branch "v${ME_VERSION}" https://github.com/NVIDIA/MinkowskiEngine.git "$ME_DIR"
+    if [[ "$CUDA_MAJOR" == "12" ]]; then
+        log "CUDA 12.x: cloning ME main branch (has Thrust compatibility fixes)..."
+        git clone https://github.com/NVIDIA/MinkowskiEngine.git "$ME_DIR"
+    else
+        git clone --branch "v${ME_VERSION}" https://github.com/NVIDIA/MinkowskiEngine.git "$ME_DIR"
+    fi
     cd "$ME_DIR"
 
     pip install ninja
-    python setup.py install --blas=openblas --force_cuda
+    MAX_JOBS=4 python setup.py install --blas=openblas --force_cuda
 
     cd -
     rm -rf "$ME_DIR"

@@ -33,7 +33,7 @@ from losses import (
     VoxelLaplacian,
     get_loss_fn,
 )
-from model import FiLMHeadSparseUNet, FiLMSparseUNet, SparseUNet
+from model import FiLMHeadSparseUNet, FiLMHeadSparseUNetV2, FiLMSparseUNet, SparseUNet
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -90,6 +90,7 @@ def _build_datasets(cfg: TrainConfig):
         frame_stride=dc.frame_stride,
         use_chamfer=use_chamfer,
         chamfer_padding=lc.chamfer_padding,
+        rate_jitter=dc.rate_jitter,
     )
     logger.info("Loading validation data...")
     val_ds = MultiFrameDataset(
@@ -114,7 +115,7 @@ def _build_datasets(cfg: TrainConfig):
     # Batch sampling strategy for multi-rate
     train_sampler = None
     val_sampler = None
-    is_film = cfg.model.model_type in ("film", "film_head")
+    is_film = cfg.model.model_type in ("film", "film_head", "film_head_v2")
     if len(rates) > 1 and train_ds.patch_rates:
         if is_film:
             # FiLM: mixed-rate batches with balanced rate representation
@@ -142,11 +143,11 @@ def _build_datasets(cfg: TrainConfig):
 
 def _rate_to_label(rate_val: float, rate_repr: str) -> str:
     """Convert a numeric rate value back to a rate label (e.g. 'r2') for logging."""
-    if rate_repr == "bpp":
-        from dataset import RATE_BPP
+    if rate_repr in ("bpp", "fourier"):
+        from dataset import RATE_BPP, bpp_to_log
 
-        # Find closest matching rate
-        best_key = min(RATE_BPP, key=lambda k: abs(RATE_BPP[k] - rate_val))
+        # rate_val is in log-space; compare in log-space
+        best_key = min(RATE_BPP, key=lambda k: abs(bpp_to_log(RATE_BPP[k]) - rate_val))
         return best_key
     return f"r{int(round(rate_val * 7))}"
 
@@ -161,6 +162,7 @@ def train_one_epoch(
     max_grad_norm=1.0,
     kendall=None,
     lap_op=None,
+    kendall_rate=None,
 ):
     lc = cfg.loss
     use_chamfer = loss_fn.needs_chamfer
@@ -175,7 +177,9 @@ def train_one_epoch(
     total_grad_norm = 0.0
     total_extras = {}
 
-    is_film = isinstance(model, (FiLMSparseUNet, FiLMHeadSparseUNet))
+    is_film = isinstance(
+        model, (FiLMSparseUNet, FiLMHeadSparseUNet, FiLMHeadSparseUNetV2)
+    )
     # Per-rate tracking
     from collections import defaultdict
 
@@ -197,6 +201,22 @@ def train_one_epoch(
         else:
             pred = model(sin)
 
+        use_kendall_rates = cfg.loss.use_kendall_rates and kendall_rate is not None
+        use_dynamic_rates = cfg.loss.use_dynamic_rates
+        use_per_patch = use_kendall_rates or use_dynamic_rates
+        patch_weights = None
+        if is_film and lc.rate_weights and not use_per_patch:
+            rate_weight_map = dict(zip(cfg.data.rates, lc.rate_weights))
+            patch_weights = torch.tensor(
+                [
+                    rate_weight_map.get(
+                        _rate_to_label(r.item(), cfg.model.film_rate_repr), 1.0
+                    )
+                    for r in rates
+                ],
+                device=device,
+            )
+
         ctx = LossContext(
             curvature=batch[3].float().to(device),
             original_patches=batch[2] if use_chamfer else None,
@@ -204,9 +224,40 @@ def train_one_epoch(
             input_sparse=None if use_chamfer else sin,
             kendall=kendall,
             lap_op=lap_op,
+            patch_weights=patch_weights,
+            return_per_patch=use_per_patch,
         )
 
         loss, extras = loss_fn(pred, lc, ctx)
+
+        if use_kendall_rates or use_dynamic_rates:
+            patch_cd_map = extras.pop("patch_cd_by_batch", {})
+            rate_tensors = []
+            for rate_name in cfg.data.rates:
+                tensors = [
+                    v
+                    for b_idx, v in patch_cd_map.items()
+                    if _rate_to_label(rates[b_idx].item(), cfg.model.film_rate_repr)
+                    == rate_name
+                ]
+                if tensors:
+                    rate_tensors.append(torch.stack(tensors).mean())
+                else:
+                    rate_tensors.append(
+                        torch.zeros(1, device=device, requires_grad=True).squeeze()
+                    )
+
+            if use_kendall_rates:
+                loss = kendall_rate(*rate_tensors)
+                for i, r in enumerate(cfg.data.rates):
+                    extras[f"kw_{r}"] = kendall_rate.weights()[i]
+            else:
+                rate_stack = torch.stack(rate_tensors)
+                weights = rate_stack.detach().clamp(min=1e-6)
+                weights = (weights / weights.mean()).clamp(0.1, 10.0)
+                loss = (weights * rate_stack).sum()
+                for i, r in enumerate(cfg.data.rates):
+                    extras[f"dw_{r}"] = weights[i].item()
 
         optimizer.zero_grad()
         loss.backward()
@@ -265,6 +316,7 @@ def validate(
     loss_fn: LossFunction,
     kendall=None,
     lap_op=None,
+    kendall_rate=None,
 ):
     lc = cfg.loss
     use_chamfer = loss_fn.needs_chamfer
@@ -278,7 +330,9 @@ def validate(
     total_points = 0
     total_extras = {}
 
-    is_film = isinstance(model, (FiLMSparseUNet, FiLMHeadSparseUNet))
+    is_film = isinstance(
+        model, (FiLMSparseUNet, FiLMHeadSparseUNet, FiLMHeadSparseUNetV2)
+    )
     from collections import defaultdict
 
     rate_stats = defaultdict(lambda: {"pred_abs": 0.0, "points": 0})
@@ -299,6 +353,22 @@ def validate(
         else:
             pred = model(sin)
 
+        use_kendall_rates = cfg.loss.use_kendall_rates and kendall_rate is not None
+        use_dynamic_rates = cfg.loss.use_dynamic_rates
+        use_per_patch = use_kendall_rates or use_dynamic_rates
+        patch_weights = None
+        if is_film and lc.rate_weights and not use_per_patch:
+            rate_weight_map = dict(zip(cfg.data.rates, lc.rate_weights))
+            patch_weights = torch.tensor(
+                [
+                    rate_weight_map.get(
+                        _rate_to_label(r.item(), cfg.model.film_rate_repr), 1.0
+                    )
+                    for r in rates
+                ],
+                device=device,
+            )
+
         ctx = LossContext(
             curvature=batch[3].float().to(device),
             original_patches=batch[2] if use_chamfer else None,
@@ -306,9 +376,40 @@ def validate(
             input_sparse=None if use_chamfer else sin,
             kendall=kendall,
             lap_op=lap_op,
+            patch_weights=patch_weights,
+            return_per_patch=use_per_patch,
         )
 
         loss, extras = loss_fn(pred, lc, ctx)
+
+        if use_kendall_rates or use_dynamic_rates:
+            patch_cd_map = extras.pop("patch_cd_by_batch", {})
+            rate_tensors = []
+            for rate_name in cfg.data.rates:
+                tensors = [
+                    v
+                    for b_idx, v in patch_cd_map.items()
+                    if _rate_to_label(rates[b_idx].item(), cfg.model.film_rate_repr)
+                    == rate_name
+                ]
+                if tensors:
+                    rate_tensors.append(torch.stack(tensors).mean())
+                else:
+                    rate_tensors.append(torch.zeros(1, device=device).squeeze())
+
+            if use_kendall_rates:
+                rate_stack = torch.stack(rate_tensors)
+                rate_stack = rate_stack / rate_stack.detach().mean().clamp(min=1e-8)
+                loss = kendall_rate(*rate_stack.unbind())
+                for i, r in enumerate(cfg.data.rates):
+                    extras[f"kw_{r}"] = kendall_rate.weights()[i]
+            else:
+                rate_stack = torch.stack(rate_tensors)
+                weights = rate_stack.detach().clamp(min=1e-6)
+                weights = (weights / weights.mean()).clamp(0.1, 10.0)
+                loss = (weights * rate_stack).sum()
+                for i, r in enumerate(cfg.data.rates):
+                    extras[f"dw_{r}"] = weights[i].item()
 
         pred_mag = pred.F.norm(dim=-1)
         n_pts = pred_mag.shape[0]
@@ -319,7 +420,7 @@ def validate(
         if is_film:
             batch_indices = pred.C[:, 0].long()
             for bi in range(rates.shape[0]):
-                r_key = f"r{int(round(rates[bi].item() * 7))}"
+                r_key = _rate_to_label(rates[bi].item(), cfg.model.film_rate_repr)
                 mask = batch_indices == bi
                 rs = rate_stats[r_key]
                 rs["pred_abs"] += pred_mag[mask].sum().item()
@@ -400,6 +501,18 @@ def _log_epoch(epoch, total_epochs, t, v, lr, elapsed, use_chamfer):
         ]
         logger.info(f"  per_rate_abs: {' | '.join(parts)}")
 
+    # Kendall rate weights (auto-detected by kw_r* keys)
+    kw_rate_keys = sorted(k for k in t if k.startswith("kw_r"))
+    if kw_rate_keys:
+        parts = [f"{k}: {t[k]:.4f}" for k in kw_rate_keys]
+        logger.info(f"  kendall_rate_weights: {' | '.join(parts)}")
+
+    # Dynamic rate weights (auto-detected by dw_r* keys)
+    dw_rate_keys = sorted(k for k in t if k.startswith("dw_r"))
+    if dw_rate_keys:
+        parts = [f"{k}: {t[k]:.4f}" for k in dw_rate_keys]
+        logger.info(f"  dynamic_rate_weights: {' | '.join(parts)}")
+
     # Loss-specific extras (auto-detected from stats keys)
     extra_groups = [
         # (key_to_check, format_fn)
@@ -441,6 +554,20 @@ def main():
     cfg = load_config(args.config)
     if args.overrides:
         apply_overrides(cfg, args.overrides)
+
+    # Resolve relative paths from project root (parent of postprocessing/)
+    project_root = Path(__file__).resolve().parent.parent
+    for attr in ("data_root",):
+        val = getattr(cfg.data, attr)
+        if not Path(val).is_absolute():
+            setattr(cfg.data, attr, str(project_root / val))
+    if not Path(cfg.save_dir).is_absolute():
+        cfg.save_dir = str(project_root / cfg.save_dir)
+    if cfg.pretrained_backbone and not Path(cfg.pretrained_backbone).is_absolute():
+        cfg.pretrained_backbone = str(project_root / cfg.pretrained_backbone)
+
+    if cfg.num_workers < 0:
+        cfg.num_workers = os.cpu_count() or 8
 
     _setup_logging(cfg.log_file)
 
@@ -500,23 +627,82 @@ def main():
             film_embed_dim=mc.film_embed_dim,
             rate_repr=mc.film_rate_repr,
         ).to(device)
+    elif mc.model_type == "film_head_v2":
+        model = FiLMHeadSparseUNetV2(
+            in_channels=in_ch,
+            max_displacement=mc.max_displacement,
+            film_embed_dim=mc.film_embed_dim,
+            rate_repr=mc.film_rate_repr,
+        ).to(device)
     else:
         model = SparseUNet(in_channels=in_ch, max_displacement=mc.max_displacement).to(
             device
         )
+    # Two-stage: load pretrained backbone and freeze it
+    if cfg.pretrained_backbone:
+        bb_ckpt = torch.load(cfg.pretrained_backbone, map_location=device)
+        bb_sd = bb_ckpt["model_state_dict"]
+        missing, unexpected = model.load_state_dict(bb_sd, strict=False)
+        logger.info(
+            f"Loaded pretrained backbone from {cfg.pretrained_backbone} "
+            f"(missing={len(missing)}, unexpected={len(unexpected)})"
+        )
+        # Freeze backbone; keep final decoder block + head + rate conditioning
+        # trainable.
+        # Trainable prefixes depend on model type.
+        if mc.model_type == "film_head_v2":
+            trainable_prefixes = (
+                "dec_block1.",
+                "conv_out.",
+                "rate_encoder.",
+                "film_head.",
+            )
+        else:
+            # Legacy: FiLMSparseUNet keeps film_gen + film_proj trainable
+            trainable_prefixes = ("film_gen.", "film_proj.")
+        n_frozen = 0
+        for name, param in model.named_parameters():
+            if not any(name.startswith(p) for p in trainable_prefixes):
+                param.requires_grad = False
+                n_frozen += 1
+        n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info(
+            f"Frozen {n_frozen} params; {n_trainable:,} trainable "
+            f"(prefixes: {trainable_prefixes})"
+        )
+
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"Model: {mc.model_type} | Parameters: {n_params:,}")
+    logger.info(f"Model: {mc.model_type} | Parameters: {n_params:,} trainable")
 
     # Kendall uncertainty weights + VoxelLaplacian (derived from loss function)
     loss_fn = get_loss_fn(cfg.loss.loss_type)
     kendall = None
     lap_op = None
+    kendall_rate = None
     if loss_fn.needs_kendall:
         kendall = KendallUncertaintyWeights(n_tasks=2).to(device)
         logger.info("Using Kendall learned uncertainty weighting (2 tasks)")
     if loss_fn.needs_lap_op:
         lap_op = VoxelLaplacian().to(device)
         logger.info("Using fixed VoxelLaplacian conv")
+    if cfg.loss.use_kendall_rates:
+        n_rates = len(cfg.data.rates)
+        kendall_rate = KendallUncertaintyWeights(n_tasks=n_rates).to(device)
+        # Initialize from static prior if provided: log_var = log(1 / (2*w))
+        # This encodes domain knowledge (r2 richest signal) as a starting point
+        # that Kendall can refine, rather than starting from equal weights.
+        if cfg.loss.rate_weights and len(cfg.loss.rate_weights) == n_rates:
+            init_log_vars = [math.log(1.0 / (2.0 * w)) for w in cfg.loss.rate_weights]
+            with torch.no_grad():
+                kendall_rate.log_vars.copy_(torch.tensor(init_log_vars))
+            init_strs = [f"{v:.3f}" for v in init_log_vars]
+            logger.info(
+                f"Kendall log_vars initialized from prior "
+                f"{cfg.loss.rate_weights}: {init_strs}"
+            )
+        logger.info(
+            f"Using Kendall learned rate weighting ({n_rates} rates: {cfg.data.rates})"
+        )
 
     # AdamW with decoupled weight decay (exclude norm params)
     # Support differential LR: encoder at encoder_lr_scale * lr
@@ -543,6 +729,10 @@ def main():
     if kendall is not None:
         param_groups.append(
             {"params": kendall.parameters(), "lr": cfg.lr, "weight_decay": 0.0}
+        )
+    if kendall_rate is not None:
+        param_groups.append(
+            {"params": kendall_rate.parameters(), "lr": cfg.lr, "weight_decay": 0.0}
         )
     optimizer = torch.optim.AdamW(param_groups, lr=cfg.lr)
     if cfg.encoder_lr_scale != 1.0:
@@ -616,6 +806,7 @@ def main():
             loss_fn,
             kendall=kendall,
             lap_op=lap_op,
+            kendall_rate=kendall_rate,
         )
         v_stats = validate(
             model,
@@ -625,6 +816,7 @@ def main():
             loss_fn,
             kendall=kendall,
             lap_op=lap_op,
+            kendall_rate=kendall_rate,
         )
         scheduler.step()
 
@@ -632,9 +824,9 @@ def main():
         lr = optimizer.param_groups[0]["lr"]
         _log_epoch(epoch, cfg.epochs, t_stats, v_stats, lr, elapsed, use_chamfer)
 
-        # Save best model
+        # Save best model (skip warmup epochs -- low LR inflates val artifact)
         val_loss = v_stats["loss"]
-        if val_loss < best_val_loss:
+        if epoch > cfg.warmup_epochs and val_loss < best_val_loss:
             best_val_loss = val_loss
             ckpt_path = save_dir / f"best_{rate_label}.pt"
             ckpt_data = {
@@ -646,6 +838,8 @@ def main():
             }
             if kendall is not None:
                 ckpt_data["kendall_state_dict"] = kendall.state_dict()
+            if kendall_rate is not None:
+                ckpt_data["kendall_rate_state_dict"] = kendall_rate.state_dict()
             torch.save(ckpt_data, ckpt_path)
             logger.info(f"  * New best (val_loss={val_loss:.4f})")
 
@@ -661,6 +855,8 @@ def main():
             }
             if kendall is not None:
                 ckpt_data["kendall_state_dict"] = kendall.state_dict()
+            if kendall_rate is not None:
+                ckpt_data["kendall_rate_state_dict"] = kendall_rate.state_dict()
             torch.save(ckpt_data, ckpt_path)
 
     logger.info(f"Training complete. Best val_loss: {best_val_loss:.4f}")

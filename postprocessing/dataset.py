@@ -43,6 +43,15 @@ RATE_BPP = {
 }
 
 
+def bpp_to_log(bpp: float) -> float:
+    """Convert raw BPP to log-space for model conditioning.
+
+    log(bpp) maps [0.025, 0.40] to [-3.69, -0.92], giving better spread
+    across rates and natural handling of unseen values.
+    """
+    return float(np.log(bpp))
+
+
 def compute_curvature(points: np.ndarray, k: int = 30) -> np.ndarray:
     """PCA-based curvature: lambda_min / sum(lambdas) per point (vectorized)."""
     n = len(points)
@@ -135,9 +144,11 @@ class MultiFrameDataset(Dataset):
         frame_stride: int = 1,
         use_chamfer: bool = False,
         chamfer_padding: int = 10,
+        rate_jitter: float = 0.0,
     ):
         self.data_root = Path(data_root)
         self.patch_size = patch_size
+        self.rate_jitter = rate_jitter
         self.augment = augment
         self.use_chamfer = use_chamfer
         self.chamfer_padding = chamfer_padding
@@ -314,7 +325,10 @@ class MultiFrameDataset(Dataset):
 
         coords_int = np.floor(coords).astype(np.int32)
 
-        rate_index = RATE_BPP[self.patch_rates[idx]]
+        log_bpp = bpp_to_log(RATE_BPP[self.patch_rates[idx]])
+        if self.rate_jitter > 0 and self.augment:
+            log_bpp += np.random.normal(0, self.rate_jitter)
+        rate_index = log_bpp
 
         if self.use_chamfer:
             return coords_int, features, orig_crop, curvature, rate_index

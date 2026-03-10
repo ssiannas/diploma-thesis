@@ -1,0 +1,23 @@
+# FiLM v8: Two-stage -- frozen r2 backbone + FiLM head training
+# Stage 1 backbone: cd_20cloud_s1_r2.pt (4ch with curvature, +1.45 dB at r2)
+# Stage 2: freeze backbone, train only FiLM scale_net on r2+r4+r6
+data:
+  rates: [r2, r4, r6]
+  frame_stride: 12
+  augment: true
+  use_curvature: true
+  max_clouds: 40
+
+model:
+  model_type: film_head
+  film_rate_repr: bpp
+
+loss:
+  loss_type: cd
+
+pretrained_backbone: models/postprocessing/good_candidates/cd_20cloud_s1_r2.pt
+batch_size: 42
+lr: 1e-3
+weight_decay: 0.0
+warmup_epochs: 3
+epochs: 30
