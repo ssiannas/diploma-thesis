@@ -1,0 +1,25 @@
+# Curvature ablation: identical to v10 head except use_curvature: false (3ch input)
+# Batch size reduced to 28 for 16GB VRAM (lab PC)
+data:
+  rates: [r2, r4, r6]
+  frame_stride: 12
+  augment: true
+  use_curvature: false
+
+model:
+  model_type: film_head_v2
+  film_rate_repr: bpp
+  film_embed_dim: 64
+
+loss:
+  loss_type: cd
+  rate_weights: [1.0, 0.3, 0.05]
+
+log_file: logs/film_v10_nocurv.log
+save_dir: models/postprocessing/film_v10_nocurv
+
+batch_size: 28
+lr: 5e-4
+weight_decay: 1e-4
+warmup_epochs: 3
+epochs: 30
