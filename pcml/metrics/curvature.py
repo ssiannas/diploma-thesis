@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Curvature-stratified quality metrics for oversmoothing detection.
 
 Learned point cloud codecs (e.g., PCGCv2) tend to produce oversmoothed
@@ -20,6 +18,8 @@ References:
     Wang, J., et al. (2021). "Lossy Point Cloud Geometry Compression via
         End-to-End Learning." IEEE TCSVT. (PCGCv2)
 """
+
+from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field

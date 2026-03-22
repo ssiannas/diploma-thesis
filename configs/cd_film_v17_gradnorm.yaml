@@ -1,0 +1,38 @@
+# FiLM v17 GradNorm -- per-rate loss weighting via FiLM activation gradient norms.
+# GradNorm (Chen et al., ICML 2018): weights w_i updated so ||w_i * G_i|| matches
+# a target norm proportional to relative training progress (alpha controls aggressiveness).
+# film_out.retain_grad() gives per-rate grad norms cheaply (single backward, no retain_graph).
+# Initialized from v10 nocurv weights; rate_weights serve as GradNorm initialization.
+data:
+  rates: [r2, r4, r6]
+  frame_stride: 12
+  augment: true
+  use_curvature: false
+  rate_jitter: 0.0
+
+model:
+  model_type: film_head_v2
+  max_displacement: 5.0
+  film_embed_dim: 64
+  film_rate_repr: bpp
+
+loss:
+  loss_type: cd
+  chamfer_padding: 0
+  cd_fwd_weight: 1.0
+  cd_rev_weight: 1.0
+  rate_weights: [1.0, 0.5, 0.3]
+  use_film_gradnorm: true
+  film_gradnorm_alpha: 1.5
+  film_gradnorm_lr: 0.01
+
+batch_size: 42
+lr: 1e-4
+weight_decay: 1e-4
+warmup_epochs: 3
+epochs: 30
+num_workers: 2
+encoder_lr_scale: 1.0
+pretrained_backbone: models/postprocessing/good_candidates/film_v10_nocurv_ep24_best.pt
+save_dir: models/postprocessing/film_v17_gradnorm
+log_file: logs/film_v17_gradnorm.log

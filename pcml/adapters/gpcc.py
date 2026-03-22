@@ -24,7 +24,7 @@ from typing import Optional
 import numpy as np
 
 from pcml.adapters.base import BaseAdapter, CompressionResult
-from pcml.data.loaders import PLYPointCloudLoader, PointCloudData
+from pcml.data.loaders import PLYPointCloudLoader
 
 
 class GPCCAdapter(BaseAdapter):
@@ -148,9 +148,7 @@ class GPCCAdapter(BaseAdapter):
                 f"--reconstructedDataPath={output_ply}",
             ]
 
-            start_time = time.time()
             result = subprocess.run(cmd, capture_output=True, text=True)
-            decompression_time = time.time() - start_time
 
             if result.returncode != 0:
                 raise RuntimeError(f"G-PCC decompression failed: {result.stderr}")

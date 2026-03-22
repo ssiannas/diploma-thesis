@@ -2,16 +2,10 @@
 """Tests for metrics calculation functionality."""
 
 import numpy as np
-import pytest
 
 from pcml.metrics import CompressionMetrics
 from pcml.metrics.compression import CompressionCalculator
-from pcml.metrics.quality import (
-    ColorMetrics,
-    ColorQualityCalculator,
-    GeometryMetrics,
-    GeometryQualityCalculator,
-)
+from pcml.metrics.quality import ColorQualityCalculator, GeometryQualityCalculator
 
 
 def test_compression_metrics_basic() -> None:
@@ -32,7 +26,7 @@ def test_compression_metrics_basic() -> None:
     assert metrics.compression_gain == 10.0  # 1 / 0.1
     assert abs(metrics.compression_percentage - 90.0) < 0.01
 
-    print(f"\nCompression Metrics:")
+    print("\nCompression Metrics:")
     print(f"  Original size: {metrics.original_size_bytes:,} bytes")
     print(f"  Compressed size: {metrics.compressed_size_bytes:,} bytes")
     print(f"  Compression ratio: {metrics.compression_ratio:.4f}")
@@ -57,7 +51,7 @@ def test_compression_calculator() -> None:
     assert calc_metrics.bpp_geometry == 24.0
     assert calc_metrics.bpp_color == 8.0
 
-    print(f"\nCalculated Metrics:")
+    print("\nCalculated Metrics:")
     print(f"  Compression ratio: {calc_metrics.compression_ratio:.4f}")
     print(f"  Bits per point: {calc_metrics.bits_per_point:.2f}")
     print(f"  BPP Geometry: {calc_metrics.bpp_geometry}")
@@ -98,7 +92,7 @@ def test_geometry_metrics_individual(
     assert d1 >= 0, "D1 should be non-negative"
     assert d2_sym >= 0, "D2 symmetric should be non-negative"
 
-    print(f"\nGeometry Metrics:")
+    print("\nGeometry Metrics:")
     print(f"  MSE: {mse:.6f}")
     print(f"  RMSE: {rmse:.6f}")
     print(f"  PSNR: {psnr:.2f} dB")
@@ -122,7 +116,7 @@ def test_geometry_metrics_all(
     assert np.isfinite(all_metrics.psnr)
     assert all_metrics.hausdorff >= 0
 
-    print(f"\nAll geometry metrics at once:")
+    print("\nAll geometry metrics at once:")
     print(f"  MSE: {all_metrics.mse:.6f}")
     print(f"  RMSE: {all_metrics.rmse:.6f}")
     print(f"  PSNR: {all_metrics.psnr:.2f} dB")
@@ -150,7 +144,7 @@ def test_color_metrics_individual(
     assert mae >= 0, "MAE should be non-negative"
     assert max_error >= 0, "Max error should be non-negative"
 
-    print(f"\nColor Metrics:")
+    print("\nColor Metrics:")
     print(f"  MSE: {mse:.2f}")
     print(f"  PSNR: {psnr:.2f} dB")
     print(f"  MAE: {mae:.2f}")
@@ -176,7 +170,7 @@ def test_color_metrics_all(
     assert all_metrics.mae >= 0
     assert all_metrics.max_error >= 0
 
-    print(f"\nAll color metrics:")
+    print("\nAll color metrics:")
     print(f"  MSE: {all_metrics.mse:.2f}")
     print(f"  RMSE: {all_metrics.rmse:.2f}")
     print(f"  PSNR: {all_metrics.psnr:.2f} dB")

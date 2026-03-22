@@ -7,7 +7,6 @@ without errors or memory issues.
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -131,7 +130,7 @@ class TestFullDatasetLoading:
         sequence = JPEGPleno8iVFBSequence(
             root_dir=str(dataset_path), sequence_name="longdress"
         )
-        frame = sequence.get_frame(0)
+        sequence.get_frame(0)
 
         current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()

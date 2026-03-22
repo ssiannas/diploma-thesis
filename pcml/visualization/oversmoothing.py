@@ -15,7 +15,6 @@ from matplotlib.colors import Normalize
 from mpl_toolkits.mplot3d import Axes3D
 
 from pcml.metrics.curvature import CurvatureQualityCalculator
-from pcml.visualization.point_clouds import plot_point_cloud
 
 matplotlib.use("Agg")
 

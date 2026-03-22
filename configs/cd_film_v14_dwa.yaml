@@ -1,0 +1,43 @@
+# FiLM v18 -- variance weights [1.0, 0.5, 0.3] + batch_size=42
+#
+# v16 had the right static weights but batch_size=16 (halved after OOM from v14).
+# v10_nocurv (paper model) was trained with batch_size=42 and batch_size matters
+# for Chamfer Distance loss: larger batches average gradients over more patch
+# neighborhoods, reducing boundary artifact bias from outlier-heavy patches.
+#
+# v18 = v16 with batch_size restored to 42 (matching v10_nocurv training conditions).
+# Cleanest test: nocurv, data-derived weights [1.0, 0.5, 0.3], correct batch size.
+#
+# v16 [1.0, 0.5, 0.3] bs=16: best val=1.8947 at ep13, stalled ep14-17.
+# v10_nocurv [1.0, 0.3, 0.05] bs=42: paper model (+2.06 r2 edge dB).
+#
+data:
+  rates: [r2, r4, r6]
+  frame_stride: 12
+  augment: true
+  use_curvature: false
+  rate_jitter: 0.0
+
+model:
+  model_type: film_head_v2
+  max_displacement: 5.0
+  film_embed_dim: 64
+  film_rate_repr: bpp
+
+loss:
+  loss_type: cd
+  chamfer_padding: 0
+  cd_fwd_weight: 1.0
+  cd_rev_weight: 1.0
+  rate_weights: [1.0, 0.5, 0.3]
+
+batch_size: 42
+lr: 1e-4
+weight_decay: 1e-4
+warmup_epochs: 3
+epochs: 30
+num_workers: 2
+encoder_lr_scale: 1.0
+pretrained_backbone: models/postprocessing/good_candidates/film_v10_head_ep24.pt
+save_dir: models/postprocessing/film_v18_varweights_bs42
+log_file: logs/film_v18_varweights_bs42.log

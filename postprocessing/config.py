@@ -4,10 +4,18 @@ Replaces 36 CLI args with grouped dataclasses + YAML config files.
 Usage: python postprocessing/train.py --config configs/cd_r2.yaml
 """
 
+import typing
 from dataclasses import asdict, dataclass, field, fields
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import yaml
+
+_VALID_MODEL_TYPES = frozenset(
+    ["unet", "film", "film_head", "film_head_v2", "film_head_v3", "occupancy"]
+)
+_VALID_LOSS_TYPES = frozenset(
+    ["cd", "sw_cd", "focal_cd", "edge_cd", "cd_lap", "cd_vlap"]
+)
 
 
 @dataclass
@@ -33,6 +41,7 @@ class ModelConfig:
     max_displacement: float = 5.0
     film_embed_dim: int = 64
     film_rate_repr: str = "bpp"  # bpp | onehot
+    quantize_output: bool = False
 
 
 @dataclass
@@ -55,6 +64,24 @@ class LossConfig:
     use_kendall_rates: bool = False
     # Dynamic detached rate weighting: weights = detach(L_i) / mean, clamped [0.1, 10]
     use_dynamic_rates: bool = False
+    # DWA epoch-level weighting (Liu et al., CVPR 2019): w_i ∝ exp(L_i(t-1)/L_i(t-2)/T)
+    use_dwa: bool = False
+    dwa_temp: float = 2.0  # softmax temperature; higher = smoother adaptation
+    dwa_floor: List[float] = field(
+        default_factory=list
+    )  # per-rate min weights (empty = no floor)
+    # CE auxiliary loss weight for V3 classification head (0 = disabled)
+    ce_weight: float = 0.0
+    # Focal gamma for CE loss (0 = standard CE, 2 = focal)
+    ce_focal_gamma: float = 0.0
+    # Global scale applied to CD loss (use < 1 when CE is dominant)
+    cd_loss_scale: float = 1.0
+    # GradNorm rate weighting (Chen et al., ICML 2018): weights adapted via FiLM activation grads
+    use_film_gradnorm: bool = False
+    film_gradnorm_alpha: float = (
+        1.5  # task asymmetry strength (higher = more aggressive balancing)
+    )
+    film_gradnorm_lr: float = 0.01  # lr for weight updates (separate from model lr)
 
 
 @dataclass
@@ -79,14 +106,28 @@ class TrainConfig:
     )
 
 
+def _unwrap_optional(tp: type) -> type:
+    """Return T if tp is Optional[T] (i.e. Union[T, None]), else tp unchanged."""
+    if hasattr(tp, "__origin__") and tp.__origin__ is typing.Union:
+        non_none = [a for a in tp.__args__ if a is not type(None)]
+        if len(non_none) == 1:
+            return non_none[0]
+    return tp
+
+
 def _coerce_type(value: Any, field_type: type) -> Any:
-    """Coerce a value to match the expected field type (handles YAML quirks)."""
+    """Coerce a value to match the expected field type (handles YAML quirks).
+
+    Unwraps Optional[T] before checking so that Optional[float] fields accept
+    integer YAML values and quoted numeric strings.
+    """
+    ft = _unwrap_optional(field_type)
     # PyYAML parses "1e-3" as str, not float -- coerce numeric strings
-    if field_type is float and isinstance(value, str):
+    if ft is float and isinstance(value, str):
         return float(value)
-    if field_type is int and isinstance(value, str):
+    if ft is int and isinstance(value, str):
         return int(value)
-    if field_type is float and isinstance(value, int):
+    if ft is float and isinstance(value, int):
         return float(value)
     return value
 
@@ -105,13 +146,42 @@ def _merge_dict_into_dataclass(dc: Any, d: dict) -> None:
             setattr(dc, key, value)
 
 
+def validate_config(cfg: TrainConfig) -> None:
+    """Raise ValueError if cfg contains invalid or inconsistent values."""
+    errors = []
+    if cfg.model.model_type not in _VALID_MODEL_TYPES:
+        errors.append(
+            f"model.model_type={cfg.model.model_type!r} not in {sorted(_VALID_MODEL_TYPES)}"
+        )
+    if cfg.loss.loss_type not in _VALID_LOSS_TYPES:
+        errors.append(
+            f"loss.loss_type={cfg.loss.loss_type!r} not in {sorted(_VALID_LOSS_TYPES)}"
+        )
+    if cfg.batch_size <= 0:
+        errors.append(f"batch_size={cfg.batch_size} must be > 0")
+    if cfg.lr <= 0:
+        errors.append(f"lr={cfg.lr} must be > 0")
+    if cfg.epochs <= 0:
+        errors.append(f"epochs={cfg.epochs} must be > 0")
+    if cfg.loss.rate_weights and len(cfg.loss.rate_weights) != len(cfg.data.rates):
+        errors.append(
+            f"loss.rate_weights has {len(cfg.loss.rate_weights)} entries "
+            f"but data.rates has {len(cfg.data.rates)}"
+        )
+    if errors:
+        raise ValueError(
+            "Config validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+        )
+
+
 def load_config(path: str) -> TrainConfig:
-    """Load a YAML config file into a TrainConfig dataclass."""
+    """Load a YAML config file into a validated TrainConfig dataclass."""
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
 
     cfg = TrainConfig()
     _merge_dict_into_dataclass(cfg, raw)
+    validate_config(cfg)
     return cfg
 
 

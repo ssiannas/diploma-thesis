@@ -13,6 +13,36 @@ import torch
 import torch.nn as nn
 
 FOURIER_L = 4  # number of Fourier frequency bands -> 2*L features
+MAX_RATE = 7  # r1-r7 discrete rates (onehot backward compat)
+
+
+def _get_rate_in_dim(rate_repr: str) -> int:
+    """Input dimensionality for each rate representation."""
+    if rate_repr == "onehot":
+        return MAX_RATE
+    if rate_repr == "fourier":
+        return 2 * FOURIER_L
+    return 1  # "bpp" or any scalar
+
+
+def _rate_to_input(rates: torch.Tensor, rate_repr: str) -> torch.Tensor:
+    """Convert (B,) rate tensor to model input representation.
+
+    onehot: r/7.0 values -> 7-dim one-hot.
+    bpp:    log-bpp scalars -> (B, 1).
+    fourier: log-bpp scalars -> (B, 2*FOURIER_L) positional encoding.
+    """
+    if rates.dim() == 0:
+        rates = rates.unsqueeze(0)
+    B = rates.shape[0]
+    if rate_repr == "onehot":
+        indices = (rates * MAX_RATE).round().long() - 1
+        onehot = torch.zeros(B, MAX_RATE, device=rates.device)
+        onehot.scatter_(1, indices.unsqueeze(1), 1.0)
+        return onehot
+    if rate_repr == "fourier":
+        return _fourier_encode(rates)
+    return rates.unsqueeze(1)  # (B, 1)
 
 
 def _fourier_encode(t: torch.Tensor) -> torch.Tensor:
@@ -222,8 +252,6 @@ class FiLMSparseUNet(nn.Module):
     rate_repr: "onehot" (7-dim, legacy), "bpp" (1-dim continuous bpp scalar)
     """
 
-    MAX_RATE = 7  # r1-r7 (for onehot backward compat)
-
     def __init__(
         self,
         in_channels: int = 4,
@@ -234,15 +262,7 @@ class FiLMSparseUNet(nn.Module):
         super().__init__()
         self.max_displacement = max_displacement
         self.rate_repr = rate_repr
-
-        # FiLM generator
-        if rate_repr == "onehot":
-            rate_in_dim = self.MAX_RATE
-        elif rate_repr == "fourier":
-            rate_in_dim = 2 * FOURIER_L
-        else:
-            rate_in_dim = 1
-        self.film_gen = FiLMGenerator(rate_in_dim, film_embed_dim)
+        self.film_gen = FiLMGenerator(_get_rate_in_dim(rate_repr), film_embed_dim)
 
         # Encoder
         self.conv_in = ME.MinkowskiConvolution(
@@ -293,27 +313,8 @@ class FiLMSparseUNet(nn.Module):
         )
         self.tanh = ME.MinkowskiTanh()
 
-    def _rate_to_input(self, rates: torch.Tensor) -> torch.Tensor:
-        """Convert rate tensor (B,) to model input representation.
-
-        For onehot: rates are N/7.0 values -> 7-dim onehot.
-        For bpp: rates are log-bpp scalars -> (B, 1).
-        For fourier: rates are log-bpp scalars -> (B, 2*FOURIER_L).
-        """
-        if rates.dim() == 0:
-            rates = rates.unsqueeze(0)
-        B = rates.shape[0]
-        if self.rate_repr == "onehot":
-            indices = (rates * self.MAX_RATE).round().long() - 1  # 0-indexed
-            onehot = torch.zeros(B, self.MAX_RATE, device=rates.device)
-            onehot.scatter_(1, indices.unsqueeze(1), 1.0)
-            return onehot  # (B, 7)
-        if self.rate_repr == "fourier":
-            return _fourier_encode(rates)  # (B, 2*FOURIER_L)
-        return rates.unsqueeze(1)  # (B, 1) -- bpp or scalar
-
     def forward(self, x: ME.SparseTensor, rates: torch.Tensor) -> ME.SparseTensor:
-        rate_input = self._rate_to_input(rates)  # (B, in_dim)
+        rate_input = _rate_to_input(rates, self.rate_repr)  # (B, in_dim)
         rate_embeds = self.film_gen(rate_input)  # (B, embed_dim)
 
         # Encoder
@@ -367,52 +368,30 @@ class FiLMHeadSparseUNetV2(SparseUNet):
     Forward signature: (x, rates) where rates is a (B,) tensor of log-bpp values.
     """
 
-    MAX_RATE = 7
-
     def __init__(
         self,
         in_channels: int = 4,
         max_displacement: float = 5.0,
         film_embed_dim: int = 64,
         rate_repr: str = "bpp",
+        quantize_output: bool = False,
     ):
         super().__init__(in_channels=in_channels, max_displacement=max_displacement)
         self.rate_repr = rate_repr
-
-        if rate_repr == "onehot":
-            rate_in_dim = self.MAX_RATE
-        elif rate_repr == "fourier":
-            rate_in_dim = 2 * FOURIER_L
-        else:
-            rate_in_dim = 1
-
+        self.quantize_output = quantize_output
         self.rate_encoder = nn.Sequential(
-            nn.Linear(rate_in_dim, film_embed_dim),
+            nn.Linear(_get_rate_in_dim(rate_repr), film_embed_dim),
             nn.ReLU(inplace=True),
         )
         # Outputs gamma (32) + beta (32) for the 32-ch pre-head features
         self.film_head = nn.Linear(film_embed_dim, 64)
         nn.init.zeros_(self.film_head.weight)
         nn.init.zeros_(self.film_head.bias)
-        # gamma starts at 1.0 (add in forward), beta starts at 0.0
-
-    def _rate_to_input(self, rates: torch.Tensor) -> torch.Tensor:
-        if rates.dim() == 0:
-            rates = rates.unsqueeze(0)
-        B = rates.shape[0]
-        if self.rate_repr == "onehot":
-            indices = (rates * self.MAX_RATE).round().long() - 1
-            onehot = torch.zeros(B, self.MAX_RATE, device=rates.device)
-            onehot.scatter_(1, indices.unsqueeze(1), 1.0)
-            return onehot
-        if self.rate_repr == "fourier":
-            return _fourier_encode(rates)
-        return rates.unsqueeze(1)
 
     def forward(self, x: ME.SparseTensor, rates: torch.Tensor) -> ME.SparseTensor:
         d1 = super().forward(x, return_pre_head=True)  # (N, 32)
 
-        rate_input = self._rate_to_input(rates)
+        rate_input = _rate_to_input(rates, self.rate_repr)
         rate_embed = self.rate_encoder(rate_input)  # (B, embed_dim)
         gb = self.film_head(rate_embed)  # (B, 64)
         gamma = gb[:, :32] + 1.0  # (B, 32) identity init
@@ -426,12 +405,141 @@ class FiLMHeadSparseUNetV2(SparseUNet):
         )
 
         out = self.tanh(self.conv_out(d1_mod))
+        disp = out.F * self.max_displacement
+        if self.quantize_output:
+            if self.training:
+                # Additive uniform noise: unbiased gradient estimator, no magnitude drift
+                disp = disp + torch.empty_like(disp).uniform_(-0.5, 0.5)
+            else:
+                disp = disp.round()
         out = ME.SparseTensor(
-            features=out.F * self.max_displacement,
+            features=disp,
             coordinate_map_key=out.coordinate_map_key,
             coordinate_manager=out.coordinate_manager,
         )
         return out
+
+
+class FiLMHeadSparseUNetV3(SparseUNet):
+    """Rate-conditioned sparse U-Net with integer-class displacement head.
+
+    Replaces regression with 3 x N_CLASSES-way classification over integer
+    offsets {-max_disp, ..., +max_disp}. Training uses soft expectation
+    (differentiable) for CD loss; inference uses argmax for exact integer output.
+
+    Rate conditioning via per-channel FiLM on the 32-ch pre-head features,
+    identical to V2. The backbone stays rate-invariant.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 4,
+        max_displacement: float = 5.0,
+        film_embed_dim: int = 64,
+        rate_repr: str = "bpp",
+    ):
+        super().__init__(in_channels=in_channels, max_displacement=max_displacement)
+        self.rate_repr = rate_repr
+        max_offset = int(max_displacement)
+        self.n_classes = 2 * max_offset + 1  # {-max,...,+max}
+        self.register_buffer(
+            "offsets", torch.arange(-max_offset, max_offset + 1).float()
+        )
+        self.rate_encoder = nn.Sequential(
+            nn.Linear(_get_rate_in_dim(rate_repr), film_embed_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.film_head = nn.Linear(film_embed_dim, 64)
+        nn.init.zeros_(self.film_head.weight)
+        nn.init.zeros_(self.film_head.bias)
+        # Classification head: 32 -> 3 * n_classes logits; zero init -> uniform softmax
+        self.cls_head = nn.Linear(32, 3 * self.n_classes)
+        nn.init.zeros_(self.cls_head.weight)
+        nn.init.zeros_(self.cls_head.bias)
+
+    def forward(
+        self, x: ME.SparseTensor, rates: torch.Tensor, return_logits: bool = False
+    ):
+        d1 = super().forward(x, return_pre_head=True)  # (N, 32) SparseTensor
+
+        rate_input = _rate_to_input(rates, self.rate_repr)
+        rate_embed = self.rate_encoder(rate_input)  # (B, embed_dim)
+        gb = self.film_head(rate_embed)  # (B, 64)
+        gamma = gb[:, :32] + 1.0  # identity init
+        beta = gb[:, 32:]  # zero init
+
+        batch_idx = d1.C[:, 0].long()
+        feats_mod = gamma[batch_idx] * d1.F + beta[batch_idx]  # (N, 32)
+
+        logits = self.cls_head(feats_mod).view(-1, 3, self.n_classes)  # (N, 3, C)
+
+        if self.training:
+            # Soft expectation: differentiable proxy for CD loss
+            probs = torch.softmax(logits, dim=-1)  # (N, 3, C)
+            disp = (probs * self.offsets).sum(dim=-1)  # (N, 3)
+        else:
+            # Hard argmax: exact integer displacement, zero train-test mismatch
+            disp = (logits.argmax(dim=-1) - self.n_classes // 2).float()  # (N, 3)
+
+        st = ME.SparseTensor(
+            features=disp,
+            coordinate_map_key=d1.coordinate_map_key,
+            coordinate_manager=d1.coordinate_manager,
+        )
+        if return_logits:
+            return st, logits  # logits available regardless of training mode
+        return st
+
+
+class OccupancySparseUNet(SparseUNet):
+    """Rate-conditioned sparse U-Net for voxel occupancy prediction.
+
+    Input: 4-ch [x_norm, y_norm, z_norm, is_occupied]
+        Candidates = decoded voxels (is_occupied=1) + their empty 26-neighbors (=0).
+    Output: 1-ch occupancy logit per candidate (BCEWithLogits externally).
+
+    Identical backbone to FiLMHeadSparseUNetV2/V3. Warm-start with strict=False;
+    conv_in and conv_out are reinitialized (channel count / semantics change).
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 4,
+        film_embed_dim: int = 64,
+        rate_repr: str = "bpp",
+    ):
+        super().__init__(in_channels=in_channels, max_displacement=1.0)
+        self.rate_repr = rate_repr
+        # 1-ch occupancy logit replaces 3-ch displacement head
+        self.conv_out = ME.MinkowskiConvolution(
+            32, 1, kernel_size=1, stride=1, bias=True, dimension=3
+        )
+        self.rate_encoder = nn.Sequential(
+            nn.Linear(_get_rate_in_dim(rate_repr), film_embed_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.film_head = nn.Linear(film_embed_dim, 64)
+        nn.init.zeros_(self.film_head.weight)
+        nn.init.zeros_(self.film_head.bias)
+
+    def forward(self, x: ME.SparseTensor, rates: torch.Tensor) -> ME.SparseTensor:
+        d1 = super().forward(x, return_pre_head=True)  # (N, 32) SparseTensor
+
+        rate_input = _rate_to_input(rates, self.rate_repr)
+        rate_embed = self.rate_encoder(rate_input)  # (B, embed_dim)
+        gb = self.film_head(rate_embed)  # (B, 64)
+        gamma = gb[:, :32] + 1.0
+        beta = gb[:, 32:]
+
+        batch_idx = d1.C[:, 0].long()
+        feats_mod = gamma[batch_idx] * d1.F + beta[batch_idx]
+
+        d1_mod = ME.SparseTensor(
+            features=feats_mod,
+            coordinate_map_key=d1.coordinate_map_key,
+            coordinate_manager=d1.coordinate_manager,
+        )
+        return self.conv_out(d1_mod)  # 1-ch logit SparseTensor
 
 
 class FiLMHeadSparseUNet(SparseUNet):
@@ -445,8 +553,6 @@ class FiLMHeadSparseUNet(SparseUNet):
     rate_repr: "onehot" (7-dim, legacy), "bpp" (1-dim continuous bpp scalar)
     """
 
-    MAX_RATE = 7  # for onehot backward compat
-
     def __init__(
         self,
         in_channels: int = 4,
@@ -456,16 +562,8 @@ class FiLMHeadSparseUNet(SparseUNet):
     ):
         super().__init__(in_channels=in_channels, max_displacement=max_displacement)
         self.rate_repr = rate_repr
-
-        # Rate -> scalar scale factor
-        if rate_repr == "onehot":
-            rate_in_dim = self.MAX_RATE
-        elif rate_repr == "fourier":
-            rate_in_dim = 2 * FOURIER_L
-        else:
-            rate_in_dim = 1
         self.scale_net = nn.Sequential(
-            nn.Linear(rate_in_dim, film_embed_dim),
+            nn.Linear(_get_rate_in_dim(rate_repr), film_embed_dim),
             nn.ReLU(inplace=True),
             nn.Linear(film_embed_dim, 1),
         )
@@ -475,25 +573,9 @@ class FiLMHeadSparseUNet(SparseUNet):
         nn.init.zeros_(self.scale_net[2].weight)
         self.scale_net[2].bias.data.fill_(1.0)
 
-    def _rate_to_input(self, rates: torch.Tensor) -> torch.Tensor:
-        if rates.dim() == 0:
-            rates = rates.unsqueeze(0)
-        B = rates.shape[0]
-        if self.rate_repr == "onehot":
-            indices = (rates * self.MAX_RATE).round().long() - 1
-            onehot = torch.zeros(B, self.MAX_RATE, device=rates.device)
-            onehot.scatter_(1, indices.unsqueeze(1), 1.0)
-            return onehot
-        if self.rate_repr == "fourier":
-            return _fourier_encode(rates)  # (B, 2*FOURIER_L)
-        return rates.unsqueeze(1)
-
     def forward(self, x: ME.SparseTensor, rates: torch.Tensor) -> ME.SparseTensor:
-        # Vanilla backbone forward
         out = super().forward(x)
-
-        # Rate-dependent scalar scaling per sample
-        rate_input = self._rate_to_input(rates)  # (B, in_dim)
+        rate_input = _rate_to_input(rates, self.rate_repr)  # (B, in_dim)
         scale = self.scale_net(rate_input)  # (B, 1)
 
         # Apply per-point scaling via batch indices
@@ -506,3 +588,86 @@ class FiLMHeadSparseUNet(SparseUNet):
             coordinate_manager=out.coordinate_manager,
         )
         return out
+
+
+def build_model(model_type: str, in_channels: int, **kwargs) -> nn.Module:
+    """Instantiate a model by name.
+
+    Args:
+        model_type: One of the keys in _MODEL_REGISTRY.
+        in_channels: Input feature channels (3 for xyz-only, 4 for xyz+curvature
+                     or xyz+is_occupied for occupancy models).
+        **kwargs: Forwarded to the model constructor. Common keys:
+            max_displacement (float), film_embed_dim (int), rate_repr (str),
+            quantize_output (bool).
+
+    Raises:
+        ValueError: If model_type is not recognized.
+    """
+    if model_type not in _MODEL_REGISTRY:
+        raise ValueError(
+            f"Unknown model_type={model_type!r}. Valid: {sorted(_MODEL_REGISTRY)}"
+        )
+    return _MODEL_REGISTRY[model_type](in_channels, **kwargs)
+
+
+def _build_unet(in_channels: int, **kwargs) -> SparseUNet:
+    return SparseUNet(
+        in_channels=in_channels,
+        max_displacement=kwargs.get("max_displacement", 5.0),
+    )
+
+
+def _build_film(in_channels: int, **kwargs) -> FiLMSparseUNet:
+    return FiLMSparseUNet(
+        in_channels=in_channels,
+        max_displacement=kwargs.get("max_displacement", 5.0),
+        film_embed_dim=kwargs.get("film_embed_dim", 64),
+        rate_repr=kwargs.get("rate_repr", "bpp"),
+    )
+
+
+def _build_film_head(in_channels: int, **kwargs) -> FiLMHeadSparseUNet:
+    return FiLMHeadSparseUNet(
+        in_channels=in_channels,
+        max_displacement=kwargs.get("max_displacement", 5.0),
+        film_embed_dim=kwargs.get("film_embed_dim", 64),
+        rate_repr=kwargs.get("rate_repr", "onehot"),
+    )
+
+
+def _build_film_head_v2(in_channels: int, **kwargs) -> FiLMHeadSparseUNetV2:
+    return FiLMHeadSparseUNetV2(
+        in_channels=in_channels,
+        max_displacement=kwargs.get("max_displacement", 5.0),
+        film_embed_dim=kwargs.get("film_embed_dim", 64),
+        rate_repr=kwargs.get("rate_repr", "bpp"),
+        quantize_output=kwargs.get("quantize_output", False),
+    )
+
+
+def _build_film_head_v3(in_channels: int, **kwargs) -> FiLMHeadSparseUNetV3:
+    return FiLMHeadSparseUNetV3(
+        in_channels=in_channels,
+        max_displacement=kwargs.get("max_displacement", 5.0),
+        film_embed_dim=kwargs.get("film_embed_dim", 64),
+        rate_repr=kwargs.get("rate_repr", "bpp"),
+    )
+
+
+def _build_occupancy(in_channels: int, **kwargs) -> OccupancySparseUNet:
+    return OccupancySparseUNet(
+        in_channels=in_channels,
+        film_embed_dim=kwargs.get("film_embed_dim", 64),
+        rate_repr=kwargs.get("rate_repr", "bpp"),
+    )
+
+
+_MODEL_REGISTRY = {
+    "unet": _build_unet,
+    "film": _build_film,
+    "film_head": _build_film_head,
+    "film_head_v2": _build_film_head_v2,
+    "film_head_v3": _build_film_head_v3,
+    "occupancy": _build_occupancy,
+}

@@ -34,7 +34,7 @@ def test_ply_loader_basic(local_test_data: Path) -> None:
         point_cloud.has_colors or not point_cloud.has_colors
     ), "Colors flag should be boolean"
 
-    print(f"\nLoaded point cloud:")
+    print("\nLoaded point cloud:")
     print(f"  Points: {point_cloud.num_points:,}")
     print(f"  Has colors: {point_cloud.has_colors}")
     print(f"  Has normals: {point_cloud.has_normals}")
@@ -83,7 +83,7 @@ def test_jpeg_pleno_single_frame(shared_dataset_path: Path) -> None:
     assert frame.num_points > 0, "Frame should have points"
     assert frame.geometry.shape[1] == 3, "Frame geometry should be 3D"
 
-    print(f"\nFirst frame:")
+    print("\nFirst frame:")
     print(f"  Points: {frame.num_points:,}")
     print(f"  Has colors: {frame.has_colors}")
     x_min, x_max = frame.geometry[:, 0].min(), frame.geometry[:, 0].max()
@@ -138,7 +138,7 @@ def test_point_cloud_dataset_basic(shared_dataset_path: Path) -> None:
     assert dataset.normalize is True
     assert dataset.num_points == 100000
 
-    print(f"\nDataset created:")
+    print("\nDataset created:")
     print(f"  Total samples: {len(dataset)}")
     print(f"  Normalize: {dataset.normalize}")
     print(f"  Target points: {dataset.num_points}")
@@ -147,7 +147,7 @@ def test_point_cloud_dataset_basic(shared_dataset_path: Path) -> None:
     sample = dataset[0]
     assert sample.num_points > 0, "Sample should have points"
 
-    print(f"\nSample 0:")
+    print("\nSample 0:")
     print(f"  Points: {sample.num_points:,}")
     print(
         f"  Geometry range: [{sample.geometry.min():.3f}, {sample.geometry.max():.3f}]"
@@ -173,7 +173,7 @@ def test_point_cloud_dataset_temporal(shared_dataset_path: Path) -> None:
         len(dataset_temporal) == 9
     ), "Temporal dataset should have 9 pairs (10 frames - 1)"
 
-    print(f"\nTemporal dataset:")
+    print("\nTemporal dataset:")
     print(f"  Total pairs: {len(dataset_temporal)}")
 
     frame_a, frame_b = dataset_temporal[0]

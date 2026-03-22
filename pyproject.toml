@@ -75,7 +75,7 @@ Repository = "https://github.com/username/diploma-thesis"
 Documentation = "https://github.com/username/diploma-thesis/docs"
 
 [tool.setuptools]
-packages = ["pcml"]
+packages = ["pcml", "postprocessing"]
 
 [tool.setuptools.package-data]
 pcml = ["py.typed"]
@@ -159,7 +159,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["pcml"]
+source = ["pcml", "postprocessing"]
 omit = [
     "*/tests/*",
     "*/test_*.py",
@@ -168,6 +168,12 @@ omit = [
 ]
 
 [tool.coverage.report]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+]
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",

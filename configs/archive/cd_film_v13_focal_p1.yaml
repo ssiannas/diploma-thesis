@@ -1,0 +1,38 @@
+# FiLM v13 Phase 1 -- CE-dominant focal training, frozen backbone
+# Load v10 ep24 backbone (V2 weights -> V3 strict=False), freeze encoder+dec_block2.
+# Train only cls_head + dec_block1 + film_head + rate_encoder.
+# CE focal (gamma=2) focuses gradient on hard non-zero examples.
+# CD at scale=0.1 acts as geometric regularizer only.
+data:
+  rates: [r2, r4, r6]
+  frame_stride: 12
+  augment: true
+  use_curvature: true
+  rate_jitter: 0.0
+
+model:
+  model_type: film_head_v3
+  max_displacement: 5.0
+  film_embed_dim: 64
+  film_rate_repr: bpp
+
+loss:
+  loss_type: cd
+  chamfer_padding: 0
+  cd_fwd_weight: 1.0
+  cd_rev_weight: 1.0
+  rate_weights: [1.0, 0.3, 0.05]
+  ce_weight: 1.0
+  ce_focal_gamma: 2.0
+  cd_loss_scale: 0.1
+
+batch_size: 42
+lr: 1e-4
+weight_decay: 1e-4
+warmup_epochs: 2
+epochs: 10
+num_workers: 8
+encoder_lr_scale: 1.0  # encoder is frozen; this value doesn't matter
+pretrained_backbone: models/postprocessing/good_candidates/film_v10_head_ep24.pt
+save_dir: models/postprocessing/film_v13_focal_p1
+log_file: logs/film_v13_focal_p1.log

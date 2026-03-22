@@ -1,0 +1,35 @@
+# FiLM v12 -- CE auxiliary loss on V3 classification head
+# Resume from v11_cls ep6 (near_zero=81%, pre-collapse).
+# Full unfreeze with discriminative LR (backbone 1e-5, head 1e-4).
+# CE at weight 0.15 supervises the mode directly; CD supervises mean.
+data:
+  rates: [r2, r4, r6]
+  frame_stride: 12
+  augment: true
+  use_curvature: true
+  rate_jitter: 0.0
+
+model:
+  model_type: film_head_v3
+  max_displacement: 5.0
+  film_embed_dim: 64
+  film_rate_repr: bpp
+
+loss:
+  loss_type: cd
+  chamfer_padding: 0
+  cd_fwd_weight: 1.0
+  cd_rev_weight: 1.0
+  rate_weights: [1.0, 0.3, 0.05]
+  ce_weight: 0.1
+
+batch_size: 42
+lr: 1e-4
+weight_decay: 1e-4
+warmup_epochs: 2
+epochs: 40
+num_workers: 8
+encoder_lr_scale: 0.1  # backbone LR = 1e-5, head LR = 1e-4
+resume: models/postprocessing/film_v11_cls/best_r2_r4_r6.pt  # Phase 1 best ep8 val=1.34
+save_dir: models/postprocessing/film_v12_ce
+log_file: logs/film_v12_ce.log

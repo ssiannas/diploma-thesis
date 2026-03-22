@@ -1,0 +1,26 @@
+# Occupancy v1 -- single-rate r2, warm-start from V10 backbone
+# Reformulation: predict voxel occupancy over dilated candidates
+# instead of per-point displacement. Eliminates zero-collapse pathology.
+data:
+  rates: [r2]
+  frame_stride: 7
+  augment: true
+  use_curvature: false  # occupancy model uses [xyz, is_occupied], not curvature
+
+model:
+  model_type: occupancy
+  film_embed_dim: 64
+  film_rate_repr: bpp
+
+loss:
+  focal_gamma: 2.0  # focal BCE exponent
+
+batch_size: 48
+lr: 1e-4
+weight_decay: 1e-4
+warmup_epochs: 3
+epochs: 30
+num_workers: 8
+pretrained_backbone: models/postprocessing/occ_v1_r2/epoch_3_r2.pt
+save_dir: models/postprocessing/occ_v1_r2
+log_file: logs/occ_v1_r2.log

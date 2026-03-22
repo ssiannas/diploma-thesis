@@ -53,6 +53,8 @@ results/
 datasets/8iVFB/
 datasets/ModelNet40/
 datasets/ShapeNet/
+datasets/pcgcv2_decoded/
+datasets/mvub_decoded/
 datasets/**/*.ply
 datasets/**/*.pcd
 datasets/**/*.las
@@ -108,3 +110,19 @@ Thumbs.db
 
 # extra
 to_read_for_claude*
+AGENT_CONTEXT.md
+DONE
+.trunk/
+
+# Paper build artifacts
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.fdb_latexmk
+paper/*.fls
+paper/*.log
+paper/*.pdf
+
+# Large paper figures (>500KB, stored separately)
+paper/figures/*.png
+paper/figures/*.jpg

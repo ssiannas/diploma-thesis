@@ -1,0 +1,46 @@
+# FiLM v16 -- displacement variance weights [1.0, 0.5, 0.3]
+#
+# Motivation: dynamic methods (v11 Kendall, v12 detached, v14 DWA) all collapse
+# to uniform weights due to shared backbone coupling. The fix is a principled
+# static weight derived from the data distribution, not training dynamics.
+#
+# Method: w_i = Var(||GT_displacement||) per rate, normalized to w_r2=1.0.
+# This is the analytically optimal weighting under a Gaussian likelihood model
+# (Min-SNR analog, ICCV 2023). Computed from 27 training frames:
+#   r2: var=0.0412 -> w=1.000
+#   r4: var=0.0205 -> w=0.497
+#   r6: var=0.0127 -> w=0.308
+# Rounded to [1.0, 0.5, 0.3].
+#
+# Compare to v10 [1.0, 0.3, 0.05]: v10 over-suppresses r4/r6 by 2-6x vs the
+# data-derived optimum. v16 is less aggressive but grounded in the signal.
+data:
+  rates: [r2, r4, r6]
+  frame_stride: 12
+  augment: true
+  use_curvature: false
+  rate_jitter: 0.0
+
+model:
+  model_type: film_head_v2
+  max_displacement: 5.0
+  film_embed_dim: 64
+  film_rate_repr: bpp
+
+loss:
+  loss_type: cd
+  chamfer_padding: 0
+  cd_fwd_weight: 1.0
+  cd_rev_weight: 1.0
+  rate_weights: [1.0, 0.5, 0.3]
+
+batch_size: 16
+lr: 1e-4
+weight_decay: 1e-4
+warmup_epochs: 3
+epochs: 30
+num_workers: 2
+encoder_lr_scale: 1.0
+pretrained_backbone: models/postprocessing/good_candidates/film_v10_head_ep24.pt
+save_dir: models/postprocessing/film_v16_varweights
+log_file: logs/film_v16_varweights.log

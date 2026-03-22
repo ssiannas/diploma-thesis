@@ -3,6 +3,7 @@
 Uses synthetic small clouds -- no GPU or real data required.
 """
 
+import importlib.util
 import json
 
 import numpy as np
@@ -10,12 +11,7 @@ import pytest
 
 from postprocessing.dataset import compute_curvature, extract_patches
 
-try:
-    import MinkowskiEngine
-
-    HAS_ME = True
-except ImportError:
-    HAS_ME = False
+HAS_ME = importlib.util.find_spec("MinkowskiEngine") is not None
 
 
 def _make_sphere(n: int = 2000, radius: float = 100.0) -> np.ndarray:

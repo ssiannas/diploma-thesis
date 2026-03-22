@@ -13,8 +13,7 @@ black>=22.0.0
 isort>=5.10.0
 
 # Linting
-flake8>=6.0.0
-pylint>=2.15.0
+ruff>=0.1.0
 mypy>=1.0.0
 
 # Type stubs

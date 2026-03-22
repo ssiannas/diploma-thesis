@@ -317,7 +317,6 @@ def self_weighted_chamfer_loss(
     refined = decoded + offsets
 
     unique_batches = batch_idx.unique()
-    n_patches = len(unique_batches)
 
     fwd_per_patch = []
     rev_per_patch = []
@@ -493,6 +492,108 @@ def edge_gated_chamfer_loss(
         "edge_pct": edge_pct,
     }
     return loss, extras
+
+
+# ---------------------------------------------------------------------------
+# Occupancy loss: focal BCE for binary voxel occupancy prediction
+# ---------------------------------------------------------------------------
+
+
+def focal_bce_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    gamma: float = 2.0,
+) -> torch.Tensor:
+    """Focal binary cross-entropy for voxel occupancy prediction.
+
+    logits: (N,) raw logits per candidate position
+    labels: (N,) binary GT occupancy (0.0 or 1.0)
+    gamma:  focal exponent (0 = plain BCE, 2 = standard focal)
+    """
+    bce = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+    if gamma > 0.0:
+        with torch.no_grad():
+            pt = torch.where(
+                labels > 0.5, torch.sigmoid(logits), 1.0 - torch.sigmoid(logits)
+            )
+            weight = (1.0 - pt).pow(gamma)
+        bce = weight * bce
+    return bce.mean()
+
+
+# ---------------------------------------------------------------------------
+# CE auxiliary loss for V3 classification head
+# ---------------------------------------------------------------------------
+
+
+def gaussian_soft_labels(
+    gt_int_disp: torch.Tensor,
+    num_classes: int = 11,
+    sigma: float = 0.75,
+) -> torch.Tensor:
+    """Gaussian soft targets for integer displacement classification.
+
+    gt_int_disp: (N, 3) integer displacements in [-(C//2), +(C//2)]
+    Returns: (N, 3, num_classes) soft label distributions summing to 1.
+    """
+    max_offset = num_classes // 2
+    offsets = torch.arange(
+        -max_offset, max_offset + 1, device=gt_int_disp.device
+    ).float()
+    diff = offsets - gt_int_disp.unsqueeze(-1).float()  # (N, 3, C)
+    return F.softmax(-(diff**2) / (2 * sigma**2), dim=-1)
+
+
+def cls_ce_loss(
+    logits: torch.Tensor,
+    decoded_coords: torch.Tensor,
+    original_patches: list,
+    batch_idx: torch.Tensor,
+    num_classes: int = 11,
+    sigma: float = 0.75,
+    focal_gamma: float = 0.0,
+) -> torch.Tensor:
+    """CE loss against NN-matched GT integer displacement, with optional focal weighting.
+
+    logits: (N, 3, num_classes) raw logits
+    decoded_coords: (N, 3) integer voxel coordinates of decoded points
+    original_patches: list of (M_i, 3) float tensors (original crop per batch elem)
+    batch_idx: (N,) batch element index per point
+    focal_gamma: if > 0, apply focal weighting (1 - p_gt)^gamma per point per dim,
+                 where p_gt is the model probability assigned to the GT argmax class.
+                 This downweights confident (easy) predictions, focusing on hard examples.
+    """
+    max_offset = num_classes // 2
+    gt_disp = torch.zeros(
+        decoded_coords.shape[0], 3, dtype=torch.long, device=decoded_coords.device
+    )
+
+    for i, b in enumerate(batch_idx.unique()):
+        mask = batch_idx == b
+        dec_b = decoded_coords[mask].float()
+        orig_b = original_patches[i].to(dec_b.device)
+        if orig_b.shape[0] == 0:
+            continue
+        nn_idx = torch.cdist(dec_b, orig_b).argmin(dim=1)
+        disp_b = (orig_b[nn_idx] - dec_b).round().long().clamp(-max_offset, max_offset)
+        gt_disp[mask] = disp_b
+
+    soft_targets = gaussian_soft_labels(gt_disp, num_classes=num_classes, sigma=sigma)
+    probs = torch.softmax(logits, dim=-1)
+    log_probs = torch.log(probs.clamp(min=1e-8))
+    # Per-point per-dim CE: (N, 3)
+    ce = -(soft_targets * log_probs).sum(dim=-1)
+
+    if focal_gamma > 0.0:
+        # p_gt: probability assigned to the hard-argmax GT class (N, 3)
+        gt_idx = (gt_disp + max_offset).clamp(
+            0, num_classes - 1
+        )  # (N, 3) class indices
+        p_gt = probs.gather(-1, gt_idx.unsqueeze(-1)).squeeze(-1)  # (N, 3)
+        focal_weight = (1.0 - p_gt).pow(focal_gamma).detach()
+        ce = focal_weight * ce
+
+    return ce.mean()
 
 
 # ---------------------------------------------------------------------------

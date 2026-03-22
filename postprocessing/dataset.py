@@ -22,6 +22,59 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# 26-connectivity offsets for voxel dilation (all neighbors except self)
+_OFFSETS_26 = np.array(
+    [
+        [dx, dy, dz]
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        for dz in (-1, 0, 1)
+        if dx or dy or dz
+    ],
+    dtype=np.int32,
+)  # (26, 3)
+
+
+def _dilate_and_label(
+    decoded_int: np.ndarray,  # (N, 3) int32, decoded voxels after aug
+    orig_int: np.ndarray,  # (M, 3) int32, original voxels (GT) after aug
+) -> tuple:
+    """Dilate decoded voxels by 1, label each candidate by GT occupancy.
+
+    Returns:
+        all_coords: (N+K, 3) int32 -- decoded voxels then unique empty neighbors
+        features:   (N+K, 4) float32 -- [x/S, y/S, z/S, is_occupied]
+        labels:     (N+K,)   float32 -- 1 if coord in GT set, else 0
+    """
+    # All 26-neighbors of decoded voxels
+    all_neighbors = (decoded_int[:, None, :] + _OFFSETS_26[None, :, :]).reshape(-1, 3)
+
+    occupied_set = {tuple(c) for c in decoded_int.tolist()}
+    # Empty candidates: neighbors not already occupied
+    empty = np.array(
+        [c for c in all_neighbors.tolist() if tuple(c) not in occupied_set],
+        dtype=np.int32,
+    )
+    if len(empty) > 0:
+        empty = np.unique(empty, axis=0)
+        all_coords = np.vstack([decoded_int, empty])
+    else:
+        all_coords = decoded_int
+
+    n_dec = len(decoded_int)
+
+    gt_set = {tuple(c) for c in orig_int.tolist()}
+    labels = np.array(
+        [float(tuple(c) in gt_set) for c in all_coords.tolist()], dtype=np.float32
+    )
+
+    is_occ = np.zeros(len(all_coords), dtype=np.float32)
+    is_occ[:n_dec] = 1.0
+    features = np.column_stack([all_coords.astype(np.float32) / COORD_SCALE, is_occ])
+
+    return all_coords, features, labels
+
+
 SEQUENCES = [
     "longdress_vox10_1300",
     "loot_vox10_1200",
@@ -145,13 +198,16 @@ class MultiFrameDataset(Dataset):
         use_chamfer: bool = False,
         chamfer_padding: int = 10,
         rate_jitter: float = 0.0,
+        use_occupancy: bool = False,
     ):
         self.data_root = Path(data_root)
         self.patch_size = patch_size
         self.rate_jitter = rate_jitter
         self.augment = augment
-        self.use_chamfer = use_chamfer
-        self.chamfer_padding = chamfer_padding
+        self.use_occupancy = use_occupancy
+        # Occupancy mode requires original clouds (same as chamfer)
+        self.use_chamfer = use_chamfer or use_occupancy
+        self.chamfer_padding = 2 if use_occupancy else chamfer_padding
         self.patches: List[Tuple[int, np.ndarray]] = []
         self.patch_rates: List[str] = []  # rate label per patch
 
@@ -232,7 +288,7 @@ class MultiFrameDataset(Dataset):
             else:
                 curvature = compute_curvature(decoded, k=curvature_k)
 
-            if use_chamfer:
+            if self.use_chamfer:
                 # No displacement needed -- store dummy, original stored separately
                 displacement = np.zeros((len(decoded), 3), dtype=np.float32)
             else:
@@ -254,9 +310,9 @@ class MultiFrameDataset(Dataset):
             self.curvatures.append(curvature)
             self.cloud_metadata.append((seq, frame))
 
-            if use_chamfer and cache_key in original_cache:
+            if self.use_chamfer and cache_key in original_cache:
                 self.original_clouds.append(original_cache[cache_key])
-            elif use_chamfer:
+            elif self.use_chamfer:
                 logger.warning(f"No original for chamfer: {frame_dir}")
                 continue
 
@@ -330,6 +386,13 @@ class MultiFrameDataset(Dataset):
             log_bpp += np.random.normal(0, self.rate_jitter)
         rate_index = log_bpp
 
+        if self.use_occupancy:
+            decoded_int = np.floor(coords).astype(np.int32)
+            orig_int = np.floor(orig_crop).astype(np.int32)
+            all_coords_int, occ_feats, labels = _dilate_and_label(decoded_int, orig_int)
+            dummy_curv = np.zeros(len(all_coords_int), dtype=np.float32)
+            return all_coords_int, occ_feats, labels, dummy_curv, rate_index
+
         if self.use_chamfer:
             return coords_int, features, orig_crop, curvature, rate_index
 
@@ -349,6 +412,30 @@ class MultiFrameDataset(Dataset):
         rate_batch = torch.tensor(rate_list, dtype=torch.float32)
 
         return coords_batch, feats_batch, disp_batch, curv_batch, rate_batch
+
+    @staticmethod
+    def collate_fn_occupancy(batch):
+        """Collate for occupancy mode.
+
+        Labels are packed as an extra feature channel before ME.sparse_collate
+        so that ME's coordinate reordering keeps labels aligned with features.
+        Returns (coords, feats, labels, rates) -- no curvature.
+        """
+        coords_list, feats_list, labels_list, _, rate_list = zip(*batch)
+
+        # Pack labels as last feature so ME sorts them consistently with feats
+        feats_with_label = [
+            np.column_stack([f, lbl[:, np.newaxis]])
+            for f, lbl in zip(feats_list, labels_list)
+        ]
+        coords_batch, feats_label_batch = ME.utils.sparse_collate(
+            [torch.from_numpy(c) for c in coords_list],
+            [torch.from_numpy(f) for f in feats_with_label],
+        )
+        feats_batch = feats_label_batch[:, :-1]  # (N_total, 4)
+        labels_batch = feats_label_batch[:, -1]  # (N_total,)
+        rate_batch = torch.tensor(rate_list, dtype=torch.float32)
+        return coords_batch, feats_batch, labels_batch, rate_batch
 
     @staticmethod
     def collate_fn_chamfer(batch):

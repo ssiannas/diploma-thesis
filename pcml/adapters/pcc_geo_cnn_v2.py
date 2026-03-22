@@ -167,8 +167,6 @@ class PCCGeoCNNv2Adapter(BaseAdapter):
 
     def decompress(self, compressed_data: bytes) -> tuple[np.ndarray, np.ndarray]:
         """Decompress point cloud using pcc_geo_cnn_v2."""
-        start_time = time.time()
-
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
 

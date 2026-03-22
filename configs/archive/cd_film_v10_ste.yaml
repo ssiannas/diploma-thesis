@@ -1,0 +1,34 @@
+# FiLM v10 + AUN quantization-aware training
+# Fine-tunes from v10 head checkpoint with additive uniform noise (Balle 2017).
+# AUN is unbiased unlike STE -- no ratcheting magnitude drift.
+# Inference rounds to integers; training adds U[-0.5, 0.5] noise instead.
+data:
+  rates: [r2, r4, r6]
+  frame_stride: 12
+  augment: true
+  use_curvature: true
+  rate_jitter: 0.0
+
+model:
+  model_type: film_head_v2
+  max_displacement: 5.0
+  film_embed_dim: 64
+  film_rate_repr: bpp
+  quantize_output: true
+
+loss:
+  loss_type: cd
+  chamfer_padding: 0
+  cd_fwd_weight: 1.0
+  cd_rev_weight: 1.0
+  rate_weights: [1.0, 0.3, 0.05]
+
+batch_size: 42
+lr: 1e-4
+weight_decay: 1e-4
+warmup_epochs: 2
+epochs: 30
+pretrained_backbone: models/postprocessing/good_candidates/film_v10_head_ep24.pt
+save_dir: models/postprocessing/film_v10_ste
+log_file: logs/film_v10_ste.log
+num_workers: 8

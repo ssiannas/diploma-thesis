@@ -13,7 +13,7 @@ See .docs/BIBLIOGRAPHY.md for full citations.
 
 import logging
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 from scipy.spatial.distance import cdist
