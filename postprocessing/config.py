@@ -14,7 +14,7 @@ _VALID_MODEL_TYPES = frozenset(
     ["unet", "film", "film_head", "film_head_v2", "film_head_v3", "occupancy"]
 )
 _VALID_LOSS_TYPES = frozenset(
-    ["cd", "sw_cd", "focal_cd", "edge_cd", "cd_lap", "cd_vlap"]
+    ["cd", "sw_cd", "focal_cd", "edge_cd", "cd_lap", "cd_vlap", "cls_focal"]
 )
 
 
@@ -82,6 +82,10 @@ class LossConfig:
         1.5  # task asymmetry strength (higher = more aggressive balancing)
     )
     film_gradnorm_lr: float = 0.01  # lr for weight updates (separate from model lr)
+    # Classification model (cls_focal): prior probability of zero displacement
+    cls_p_zero: float = 0.70  # set from histogram Step 0 output
+    # Gaussian label smoothing sigma (0.0 = hard one-hot labels, recommended)
+    cls_sigma: float = 0.0
 
 
 @dataclass

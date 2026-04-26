@@ -332,5 +332,8 @@ L1 σταθμισμένη με καμπυλότητα) αποτυγχάνουν 
 % Reset citation counter so Chapter 1 starts from [1]
 \setcounter{NAT@ctr}{0}
 
+% Restore default section numbering (chapter.section) for the main body
+\renewcommand{\thesection}{\thechapter.\arabic{section}}
+
 \selectlanguage{english}
 \cleardoublepage

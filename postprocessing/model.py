@@ -407,11 +407,8 @@ class FiLMHeadSparseUNetV2(SparseUNet):
         out = self.tanh(self.conv_out(d1_mod))
         disp = out.F * self.max_displacement
         if self.quantize_output:
-            if self.training:
-                # Additive uniform noise: unbiased gradient estimator, no magnitude drift
-                disp = disp + torch.empty_like(disp).uniform_(-0.5, 0.5)
-            else:
-                disp = disp.round()
+            # STE: forward sees rounded integers, backward gradient is identity
+            disp = disp + (disp.round() - disp).detach()
         out = ME.SparseTensor(
             features=disp,
             coordinate_map_key=out.coordinate_map_key,
@@ -588,6 +585,24 @@ class FiLMHeadSparseUNet(SparseUNet):
             coordinate_manager=out.coordinate_manager,
         )
         return out
+
+
+def init_cls_bias(model: "FiLMHeadSparseUNetV3", p_zero: float) -> None:
+    """Initialize classification head bias to prevent zero-collapse.
+
+    Sets the zero-displacement class logit to log(p_zero / (1 - p_zero)) so
+    that the softmax output matches the prior at initialization. Without this
+    the model gets stuck predicting zero displacement everywhere.
+
+    p_zero: fraction of voxels with zero displacement (from displacement_histogram.py)
+    """
+    p_zero = float(p_zero)
+    bias_zero = math.log(p_zero / (1.0 - p_zero + 1e-8))
+    zero_idx = model.n_classes // 2  # index of the zero-displacement class
+    with torch.no_grad():
+        # cls_head is Linear(32, 3 * n_classes); bias shape (3 * n_classes,)
+        for axis in range(3):
+            model.cls_head.bias[axis * model.n_classes + zero_idx] = bias_zero
 
 
 def build_model(model_type: str, in_channels: int, **kwargs) -> nn.Module:

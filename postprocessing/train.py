@@ -38,7 +38,8 @@ from losses import (
     focal_bce_loss,
     get_loss_fn,
 )
-from model import build_model
+from model import build_model, init_cls_bias
+from scipy.spatial import cKDTree
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -394,9 +395,10 @@ def train_one_epoch(
             device=device,
         )
 
+        is_cls_focal = lc.loss_type == "cls_focal"
         if is_film:
             rates = batch[4].to(device)  # (B,) tensor
-            if use_ce:
+            if use_ce or is_cls_focal:
                 pred, logits = model(sin, rates, return_logits=True)
             else:
                 pred = model(sin, rates)
@@ -422,7 +424,11 @@ def train_one_epoch(
         ctx = LossContext(
             curvature=batch[3].float().to(device),
             original_patches=batch[2] if use_chamfer else None,
-            gt_displacement=None if use_chamfer else batch[2].float().to(device),
+            gt_displacement=(
+                logits
+                if is_cls_focal
+                else (None if use_chamfer else batch[2].float().to(device))
+            ),
             input_sparse=None if use_chamfer else sin,
             kendall=kendall,
             lap_op=lap_op,
@@ -499,7 +505,10 @@ def train_one_epoch(
                     dec_b = ce_decoded[mask].float()
                     orig_b = batch[2][i].to(device)
                     if orig_b.shape[0] > 0:
-                        nn_idx = torch.cdist(dec_b, orig_b).argmin(dim=1)
+                        tree = cKDTree(orig_b.cpu().numpy())
+                        nn_idx = torch.from_numpy(
+                            tree.query(dec_b.cpu().numpy(), k=1, workers=1)[1]
+                        ).to(device)
                         disp_b = (
                             (orig_b[nn_idx] - dec_b)
                             .round()
@@ -604,6 +613,7 @@ def validate(
             device=device,
         )
 
+        is_cls_focal = lc.loss_type == "cls_focal"
         if is_film:
             rates = batch[4].to(device)  # (B,) tensor
             if is_v3:
@@ -633,7 +643,11 @@ def validate(
         ctx = LossContext(
             curvature=batch[3].float().to(device),
             original_patches=batch[2] if use_chamfer else None,
-            gt_displacement=None if use_chamfer else batch[2].float().to(device),
+            gt_displacement=(
+                logits
+                if is_cls_focal
+                else (None if use_chamfer else batch[2].float().to(device))
+            ),
             input_sparse=None if use_chamfer else sin,
             kendall=kendall,
             lap_op=lap_op,
@@ -717,7 +731,10 @@ def validate(
                 dec_b = val_decoded[mask].float()
                 orig_b = batch[2][i].to(device)
                 if orig_b.shape[0] > 0:
-                    nn_idx = torch.cdist(dec_b, orig_b).argmin(dim=1)
+                    tree = cKDTree(orig_b.cpu().numpy())
+                    nn_idx = torch.from_numpy(
+                        tree.query(dec_b.cpu().numpy(), k=1, workers=1)[1]
+                    ).to(device)
                     disp_b = (
                         (orig_b[nn_idx] - dec_b)
                         .round()
@@ -1053,6 +1070,13 @@ def main():
     for p in ema_model.parameters():
         p.requires_grad_(False)
     logger.info(f"EMA model initialized (decay={EMA_DECAY})")
+
+    # Bias init for classification model: prevents zero-collapse
+    if mc.model_type == "film_head_v3" and cfg.loss.loss_type == "cls_focal":
+        p_zero = getattr(cfg.loss, "cls_p_zero", 0.70)
+        init_cls_bias(model, p_zero)
+        init_cls_bias(ema_model, p_zero)
+        logger.info(f"Initialized cls_head zero-class bias (p_zero={p_zero:.2f})")
 
     # Kendall uncertainty weights + VoxelLaplacian (derived from loss function)
     loss_fn = None if use_occupancy else get_loss_fn(cfg.loss.loss_type)

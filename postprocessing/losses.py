@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import MinkowskiEngine as ME
+import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.spatial import cKDTree
 
 
 class VoxelLaplacian(torch.nn.Module):
@@ -544,6 +546,27 @@ def gaussian_soft_labels(
     return F.softmax(-(diff**2) / (2 * sigma**2), dim=-1)
 
 
+def ordinal_cls_loss(
+    logits: torch.Tensor,
+    gt_disp: torch.Tensor,
+    num_classes: int = 5,
+) -> torch.Tensor:
+    """Ordinal penalty: penalise predictions far from the true class.
+
+    logits:   (N, 3, num_classes)
+    gt_disp:  (N, 3) integer displacements, already clamped to [-K, K]
+    Returns scalar mean ordinal loss across all points and axes.
+    """
+    max_offset = num_classes // 2
+    gt_idx = (gt_disp + max_offset).clamp(0, num_classes - 1)  # (N, 3)
+    class_idx = torch.arange(num_classes, device=logits.device).float()
+    probs = torch.softmax(logits, dim=-1)  # (N, 3, C)
+    # Squared distance from each class to GT class, weighted by predicted prob
+    gt_pos = gt_idx.float().unsqueeze(-1)  # (N, 3, 1)
+    sq_err = (class_idx - gt_pos) ** 2  # (N, 3, C)
+    return (probs * sq_err).sum(dim=-1).mean()
+
+
 def cls_ce_loss(
     logits: torch.Tensor,
     decoded_coords: torch.Tensor,
@@ -552,6 +575,7 @@ def cls_ce_loss(
     num_classes: int = 11,
     sigma: float = 0.75,
     focal_gamma: float = 0.0,
+    p_zero: float = 0.0,
 ) -> torch.Tensor:
     """CE loss against NN-matched GT integer displacement, with optional focal weighting.
 
@@ -559,9 +583,10 @@ def cls_ce_loss(
     decoded_coords: (N, 3) integer voxel coordinates of decoded points
     original_patches: list of (M_i, 3) float tensors (original crop per batch elem)
     batch_idx: (N,) batch element index per point
-    focal_gamma: if > 0, apply focal weighting (1 - p_gt)^gamma per point per dim,
-                 where p_gt is the model probability assigned to the GT argmax class.
-                 This downweights confident (easy) predictions, focusing on hard examples.
+    focal_gamma: if > 0, apply focal weighting (1 - p_gt)^gamma per point per dim.
+    p_zero: per-axis frequency of zero displacement. If > 0, apply inverse-frequency
+            class weights: zero class gets weight (1-p_zero), non-zero get p_zero/(C-1),
+            normalized so mean weight = 1. Upweights non-zero classes proportionally.
     """
     max_offset = num_classes // 2
     gt_disp = torch.zeros(
@@ -574,24 +599,48 @@ def cls_ce_loss(
         orig_b = original_patches[i].to(dec_b.device)
         if orig_b.shape[0] == 0:
             continue
-        nn_idx = torch.cdist(dec_b, orig_b).argmin(dim=1)
+        # cKDTree avoids O(N²) GPU memory of torch.cdist for large patches
+        tree = cKDTree(orig_b.cpu().numpy())
+        nn_idx = torch.from_numpy(
+            tree.query(dec_b.cpu().numpy(), k=1, workers=1)[1]
+        ).to(dec_b.device)
         disp_b = (orig_b[nn_idx] - dec_b).round().long().clamp(-max_offset, max_offset)
         gt_disp[mask] = disp_b
 
-    soft_targets = gaussian_soft_labels(gt_disp, num_classes=num_classes, sigma=sigma)
+    gt_idx = (gt_disp + max_offset).clamp(0, num_classes - 1)  # (N, 3) hard indices
     probs = torch.softmax(logits, dim=-1)
-    log_probs = torch.log(probs.clamp(min=1e-8))
-    # Per-point per-dim CE: (N, 3)
-    ce = -(soft_targets * log_probs).sum(dim=-1)
+
+    if sigma > 0.0:
+        # Soft CE with gaussian label smoothing
+        soft_targets = gaussian_soft_labels(
+            gt_disp, num_classes=num_classes, sigma=sigma
+        )
+        log_probs = torch.log(probs.clamp(min=1e-8))
+        ce = -(soft_targets * log_probs).sum(dim=-1)  # (N, 3)
+    else:
+        # Hard CE: unambiguous one-hot targets — no partial credit for zero class
+        # logits: (N, 3, C) -> reshape to (N*3, C) for F.cross_entropy
+        N = logits.shape[0]
+        ce = F.cross_entropy(
+            logits.view(N * 3, num_classes),
+            gt_idx.view(N * 3),
+            reduction="none",
+        ).view(N, 3)
 
     if focal_gamma > 0.0:
-        # p_gt: probability assigned to the hard-argmax GT class (N, 3)
-        gt_idx = (gt_disp + max_offset).clamp(
-            0, num_classes - 1
-        )  # (N, 3) class indices
         p_gt = probs.gather(-1, gt_idx.unsqueeze(-1)).squeeze(-1)  # (N, 3)
         focal_weight = (1.0 - p_gt).pow(focal_gamma).detach()
         ce = focal_weight * ce
+
+    if p_zero > 0.0:
+        # Inverse-frequency class weights: zero class downweighted, non-zero upweighted
+        w = torch.full((num_classes,), p_zero / (num_classes - 1), device=logits.device)
+        w[max_offset] = 1.0 - p_zero
+        w = w / w.mean()  # normalize so mean weight = 1
+        # Weight each point by its GT class weight: (N, 3)
+        gt_idx = (gt_disp + max_offset).clamp(0, num_classes - 1)
+        point_weights = w[gt_idx]  # (N, 3)
+        ce = point_weights * ce
 
     return ce.mean()
 
@@ -718,6 +767,67 @@ class CDVoxelLaplacianLoss(LossFunction):
         )
 
 
+class ClassificationFocalLoss(LossFunction):
+    """Primary loss for FiLMHeadSparseUNetV3: focal CE + ordinal penalty.
+
+    Expects model to be called with return_logits=True. Bypasses CD entirely.
+    Requires original_patches in LossContext for inline 1-NN label generation.
+    """
+
+    needs_chamfer = True  # triggers original_patches loading in dataset/collate
+
+    def __call__(self, pred: ME.SparseTensor, lc, ctx: LossContext):
+        # pred.F contains soft expected displacement (training mode) — we don't use it
+        # logits are stored externally and passed via ctx.gt_displacement hack:
+        # caller must set ctx.gt_displacement = logits (N, 3, C) before calling
+        logits = ctx.gt_displacement  # (N, 3, C) — repurposed field
+        if logits is None or logits.dim() != 3:
+            raise RuntimeError(
+                "ClassificationFocalLoss requires logits in ctx.gt_displacement"
+            )
+
+        num_classes = logits.shape[-1]
+        decoded_coords = pred.C[:, 1:].float()
+        batch_idx = pred.C[:, 0].long()
+
+        ce = cls_ce_loss(
+            logits,
+            decoded_coords,
+            ctx.original_patches,
+            batch_idx,
+            num_classes=num_classes,
+            sigma=getattr(lc, "cls_sigma", 0.0),
+            focal_gamma=lc.focal_gamma,
+            p_zero=getattr(lc, "cls_p_zero", 0.0),
+        )
+
+        # Build integer GT for ordinal loss (reuse inline 1-NN from cls_ce_loss)
+        max_offset = num_classes // 2
+        gt_disp = torch.zeros(
+            decoded_coords.shape[0], 3, dtype=torch.long, device=decoded_coords.device
+        )
+        for i, b in enumerate(batch_idx.unique()):
+            mask = batch_idx == b
+            dec_b = decoded_coords[mask].float()
+            orig_b = ctx.original_patches[i].to(dec_b.device)
+            if orig_b.shape[0] > 0:
+                tree = cKDTree(orig_b.cpu().numpy())
+                nn_idx = torch.from_numpy(
+                    tree.query(dec_b.cpu().numpy(), k=1, workers=1)[1]
+                ).to(dec_b.device)
+                gt_disp[mask] = (
+                    (orig_b[nn_idx] - dec_b)
+                    .round()
+                    .long()
+                    .clamp(-max_offset, max_offset)
+                )
+
+        ordinal = ordinal_cls_loss(logits, gt_disp, num_classes=num_classes)
+        loss = ce + 0.3 * ordinal
+        extras = {"ce": ce.item(), "ordinal": ordinal.item()}
+        return loss, extras
+
+
 _REGISTRY: Dict[str, LossFunction] = {
     "cd": DynamicChamferLoss(),
     "sw_cd": SelfWeightedChamferLoss(),
@@ -725,6 +835,7 @@ _REGISTRY: Dict[str, LossFunction] = {
     "edge_cd": EdgeGatedChamferLoss(),
     "cd_lap": CDLaplacianLoss(),
     "cd_vlap": CDVoxelLaplacianLoss(),
+    "cls_focal": ClassificationFocalLoss(),
 }
 
 

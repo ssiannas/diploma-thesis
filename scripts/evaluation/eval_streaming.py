@@ -38,17 +38,27 @@ PEAK = 1023.0
 
 
 def load_model(ckpt_path: Path, device: torch.device):
-    from postprocessing.model import FiLMHeadSparseUNetV2
+    from postprocessing.model import FiLMHeadSparseUNetV2, FiLMHeadSparseUNetV3
 
     ckpt = torch.load(ckpt_path, map_location=device)
     cfg = ckpt.get("config", {})
     no_curv = not cfg.get("data", {}).get("use_curvature", True)
     in_ch = 3 if no_curv else 4
-    model = FiLMHeadSparseUNetV2(
-        in_channels=in_ch,
-        film_embed_dim=cfg.get("model", {}).get("film_embed_dim", 64),
-        rate_repr=cfg.get("model", {}).get("film_rate_repr", "bpp"),
-    ).to(device)
+    model_type = cfg.get("model", {}).get("model_type", "film_head_v2")
+    mc = cfg.get("model", {})
+    if model_type == "film_head_v3":
+        model = FiLMHeadSparseUNetV3(
+            in_channels=in_ch,
+            max_displacement=mc.get("max_displacement", 2.0),
+            film_embed_dim=mc.get("film_embed_dim", 64),
+            rate_repr=mc.get("film_rate_repr", "bpp"),
+        ).to(device)
+    else:
+        model = FiLMHeadSparseUNetV2(
+            in_channels=in_ch,
+            film_embed_dim=mc.get("film_embed_dim", 64),
+            rate_repr=mc.get("film_rate_repr", "bpp"),
+        ).to(device)
     sd = ckpt.get("ema_state_dict", ckpt["model_state_dict"])
     model.load_state_dict(sd)
     model.eval()
@@ -61,7 +71,11 @@ def load_model(ckpt_path: Path, device: torch.device):
 
 @torch.no_grad()
 def run_inference(
-    decoded: np.ndarray, rate: str, model, device: torch.device
+    decoded: np.ndarray,
+    rate: str,
+    model,
+    device: torch.device,
+    conf_threshold: float = 0.0,
 ) -> np.ndarray:
     from postprocessing.dataset import COORD_SCALE, RATE_BPP, bpp_to_log
 
@@ -77,8 +91,19 @@ def run_inference(
         ).int(),
         device=device,
     )
-    pred = model(sin, rate_tensor)
-    disp = pred.F.cpu().numpy()
+    is_v3 = hasattr(model, "n_classes")
+    if is_v3 and conf_threshold > 0.0:
+        pred, logits = model(sin, rate_tensor, return_logits=True)
+        # Suppress moves where any axis has max_prob < threshold
+        max_prob = (
+            torch.softmax(logits, dim=-1).max(dim=-1).values.min(dim=-1).values
+        )  # (N,)
+        disp = pred.F.clone()
+        disp[max_prob < conf_threshold] = 0.0
+        disp = disp.cpu().numpy()
+    else:
+        pred = model(sin, rate_tensor)
+        disp = pred.F.cpu().numpy()
     coords_out = pred.C[:, 1:].cpu().numpy().astype(np.float32)
     return coords_out + disp
 
@@ -116,6 +141,12 @@ def main():
     )
     p.add_argument("--data_root", default="datasets/pcgcv2_decoded")
     p.add_argument("--no_d1", action="store_true", help="Skip D1 PSNR (faster)")
+    p.add_argument(
+        "--conf_threshold",
+        type=float,
+        default=0.0,
+        help="V3 only: suppress moves where min-axis max_prob < threshold",
+    )
     args = p.parse_args()
 
     if args.output is None:
@@ -171,7 +202,9 @@ def main():
                 k=args.curvature_k,
                 direction="reverse",
             )
-            refined = run_inference(decoded, rate, model, device)
+            refined = run_inference(
+                decoded, rate, model, device, conf_threshold=args.conf_threshold
+            )
             ref_m = calc.compute_stratified_psnr(
                 original,
                 refined,
