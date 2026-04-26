@@ -1,0 +1,404 @@
+\section{Failed Approaches: Experimental Journey to the Final Design}
+\label{sec:failed-approaches}
+
+The final architecture and loss described in this chapter emerged from a
+sequence of experiments, most of which failed.
+This section documents those dead ends in the order they were encountered,
+explaining \emph{why} each approach failed and what each failure revealed.
+Several of the failures also point directly to constraints on future extensions.
+
+% ============================================================
+\subsection{Phase 1: Displacement Regression with L1 Loss}
+
+\paragraph{Approach.}
+The first attempt was the most natural formulation: train a sparse U-Net to
+predict per-point displacement vectors $\Delta_i$ directly, supervised by L1
+loss against precomputed nearest-neighbour targets
+$d_{gt}(\hat{p}_i) = p^*_{nn}(\hat{p}_i) - \hat{p}_i$.
+
+\paragraph{Failure: Zero-inflation collapse.}
+As analysed in Section~\ref{sec:loss}, 60\% of decoded points at r2 have
+$d_{gt} = \mathbf{0}$ (they are already correctly placed).
+The gradient of the L1 loss is $\pm 1$ scaled by the target magnitude.
+When 60\% of gradients push toward zero and 40\% push outward, the mean
+gradient across a mini-batch is biased strongly toward zero.
+Within 5--10 epochs, every network trained with this loss collapses to
+predicting near-zero displacements for all points, regardless of architecture
+size, learning rate, or regularisation.
+By epoch 10, the refined cloud is effectively unchanged from the input,
+producing PSNR improvements of $< 0.05$~dB.
+
+\paragraph{Attempted mitigations.}
+\begin{itemize}
+  \item \textit{Smooth-L1 (Huber) loss}: replaces L1 with L2 near zero and
+    L1 far from zero. This changes the gradient scale but not the directional
+    bias. Zero-collapse still occurred, only slightly slower.
+
+  \item \textit{Curvature-weighted L1}: weight each term by $1 + \alpha\kappa_i$,
+    amplifying gradient from high-curvature points (edges).
+    This helps the non-zero gradient terms dominate at edges,
+    but flat-region zero-inflation still overwhelms the total gradient.
+    Collapse to near-zero for flat points, near-correct for edge points:
+    a partial improvement but not a solution.
+
+  \item \textit{Min-of-$K$ target selection}: instead of using the 1-NN target,
+    evaluate $K = 5$ candidate targets (nearest 5 neighbours in $\pc^*$) and
+    take the one with minimum squared distance to the predicted displacement.
+    This addresses Problem~2 (NN noise) but leaves Problem~1 (zero-inflation)
+    entirely intact.
+\end{itemize}
+
+None of these mitigations resolved the problem.
+The root cause is structural: a regression loss against a target distribution
+with a heavy mass at zero is biased toward the zero predictor, regardless of
+architecture or weighting.
+
+% ============================================================
+\subsection{Phase 2: Gated Architecture (Move / No-Move Prediction)}
+
+\paragraph{Approach.}
+To directly address zero-inflation, we added a binary gate output to the network:
+a per-point probability $g_i \in [0, 1]$ predicting whether the point should
+be moved ($g_i > 0.5$) or kept in place ($g_i < 0.5$).
+Two gated architectures were implemented, inspired by learned gating
+mechanisms for sparse prediction~\cite{yu2019freeform}:
+\begin{itemize}
+  \item \textit{GatedSparseUNet}: shared backbone, separate gate head and
+    displacement head, joint training with binary cross-entropy + L1 loss.
+  \item \textit{ThresholdGatedUNet}: train gate first, then freeze it and
+    train displacement head on predicted-to-move points only.
+\end{itemize}
+
+\paragraph{Failure: Gate does not decouple the problem.}
+The gate head learns to predict which points have non-zero targets, which
+requires learning the same geometric information as the displacement head.
+This means the gate effectively learns a noisy version of the displacement
+magnitude, and its cross-entropy loss has the same zero-inflation issue:
+if 60\% of points are labeled ``no-move'' (class 0), the gate collapses to
+predicting class 0 everywhere.
+The two-stage ThresholdGated variant improves on this but suffers from poor
+gate quality during stage 1, causing stage 2 to train on a biased subset.
+
+\paragraph{Marginal improvement.}
+The gated models achieved small PSNR gains ($+0.1$--$0.2$~dB at r2), suggesting
+that the gating structure is directionally correct but insufficient.
+The gate is solving the wrong problem: trying to classify points
+rather than treating the zero-inflation as a \emph{distribution problem}
+that requires a different loss.
+
+% ============================================================
+\subsection{Phase 3: Stratified Loss (Laplacian on Edges, Zero-Penalty on Flat)}
+
+\paragraph{Approach.}
+Rather than a single loss for all points, apply different losses to different
+geometric regions:
+\begin{itemize}
+  \item For high-curvature points: a Laplacian smoothness loss penalising
+    non-smooth displacements.
+  \item For low-curvature points: an explicit L2 penalty on the displacement
+    magnitude (push displacements to zero for flat points).
+\end{itemize}
+
+The motivation was to directly encode the two failure modes into the loss.
+
+\paragraph{Failure: Two problems treated as one.}
+This approach addresses Problems~1 and~2 together rather than independently.
+The Laplacian loss on edge points adds a regularity constraint but provides no
+target supervision: it penalises rough displacements without specifying
+\emph{where} to move.
+The zero-penalty on flat points is directionally correct but leaves edge
+displacement without adequate supervision.
+
+Curvature estimated on the decoded cloud is also unreliable at edge regions
+(the decoded cloud is smooth there by construction).
+The stratification boundaries are therefore noisiest precisely where they matter
+most.
+
+The stratified loss produced moderate improvement ($+0.3$--$0.5$~dB at r2)
+but was sensitive to the curvature threshold hyperparameter and did not
+generalise well across sequences.
+
+% ============================================================
+\subsection{Phase 4: Laplacian Preservation Loss}
+
+\paragraph{Approach.}
+Inspired by geometry processing~\cite{sorkine2004laplacian} and its use
+as a deep learning regulariser~\cite{wang2018pixel2mesh}, we tried adding a
+Laplacian preservation term: the refined cloud should have the same Laplacian
+structure as the original cloud.
+Two implementations were tested:
+\begin{itemize}
+  \item \textit{kNN Laplacian}~\cite{taubin1995signal}: build a $k$-NN graph
+    on the decoded cloud, compute Laplacian coordinates, and penalise
+    deviations of the refined coordinates from target Laplacian coordinates.
+  \item \textit{Voxel Laplacian via sparse convolution}: implement the
+    Laplacian as a $3 \times 3 \times 3$ sparse convolution with fixed
+    centre-minus-mean kernel, avoiding dynamic graph construction.
+\end{itemize}
+
+\paragraph{Failure: Laplacian amplifies noise.}
+The Laplacian operator is high-pass: it amplifies differences from local means.
+On a decoded cloud with oversmoothing artifacts, the Laplacian of the decoded
+cloud is already corrupted.
+Penalising deviations from this corrupted target propagates the oversmoothing
+bias into the displacement predictions.
+
+Additionally, the kNN Laplacian requires building a dynamic graph at every
+training step, which is prohibitively slow ($\sim$10$\times$ training cost
+vs.\ standard loss).
+The voxel Laplacian is fast but uses a fixed neighbourhood structure (the
+$3^3$ grid) that is not adapted to the local point density.
+
+Neither variant improved over the baseline L1 loss in ablation experiments.
+The Laplacian approach was abandoned after these negative results.
+
+% ============================================================
+\subsection{Phase 5: Combined Chamfer Distance + Laplacian}
+
+\paragraph{Approach.}
+After discovering that the Chamfer Distance loss resolves zero-inflation
+(see Section~\ref{ssec:dcd}), we attempted to combine it with a Laplacian
+smoothness term:
+\begin{equation}
+  \mathcal{L} = \mathcal{L}_{\text{CD}} + \lambda \mathcal{L}_{\text{Lap}},
+\end{equation}
+hypothesising that the Laplacian term would prevent the CD loss from
+over-correcting (moving points to positions not on the surface).
+
+\paragraph{Failure: Laplacian is unnecessary and harmful.}
+The symmetric Chamfer Distance already prevents over-correction via its
+reverse term ($\pc^*_{\text{crop}} \to \hat{\pc}_{\text{ref}}$): if the refined
+cloud is pulled away from the surface, the reverse term increases, providing
+a corrective gradient.
+The Laplacian adds a conflicting regularisation that prevents large but correct
+displacements at edge regions.
+In practice, the combined loss produced smaller PSNR gains at r2 than CD alone
+($+1.1$~dB vs.\ $+1.45$~dB), and the tuning of $\lambda$ was unstable.
+
+The conclusion was that the Chamfer Distance is self-regularising and no
+auxiliary term is needed.
+
+% ============================================================
+\subsection{Phase 6: Deep FiLM Conditioning (Rate on All ResBlocks)}
+
+\paragraph{Approach.}
+The first multi-rate extension applied FiLM conditioning to every ResBlock
+of both encoder and decoder (architecture: FiLMSparseUNet, v3 and variants).
+The rate scalar $r = \log_2(\bpp)$ was fed through a small MLP, and the
+resulting $\gamma$ and $\beta$ vectors were broadcast to modulate features
+at each of the 6 ResBlocks.
+
+\paragraph{Failure: Gradient conflict in shared backbone.}
+When training on r2 ($\bpp = 0.05$), r4 ($\bpp = 0.15$), and r6 ($\bpp = 0.30$)
+simultaneously with deep FiLM:
+\begin{itemize}
+  \item The r2 gradient signal says: ``apply large displacements to edge points.''
+  \item The r6 gradient signal says: ``apply near-zero displacements everywhere.''
+\end{itemize}
+These gradients conflict in the shared backbone parameters.
+Because the FiLM $\gamma/\beta$ parameters also appear in the backbone, the
+conflict propagates through the conditioning pathway as well.
+
+The symptom was a flat forward Chamfer Distance loss plateau at $\approx 2.45$
+for 12 consecutive epochs, indicating that the backbone was unable to make
+progress in any direction.
+This is a gradient cancellation phenomenon: each batch of patches from r2 and
+r6 produces opposing gradient updates that largely cancel.
+
+\paragraph{Fix: Rate-invariant backbone + head-only FiLM.}
+The solution was to remove FiLM from the backbone entirely, making it
+rate-invariant, and apply FiLM conditioning only to the final 32-channel
+pre-head features.
+The backbone learns geometry-invariant features that are useful at all rates;
+the FiLM head modulates these features to produce rate-appropriate displacement
+magnitudes.
+This is the \textit{FiLMHeadSparseUNetV2} architecture described in
+Section~\ref{sec:film-head}, which resolved the gradient conflict and achieved
+the best multi-rate results.
+
+% ============================================================
+\subsection{Phase 7: Chamfer Boundary Padding}
+
+\paragraph{Approach.}
+During Chamfer Distance implementation, we initially added a boundary padding
+of $d = 10$ voxels to the original cloud crop:
+\begin{equation}
+  \pc^*_{\text{crop}} = \{p^* \in \pc^* : p^* \in
+    [u_{\min} - d,\, u_{\max} + d]^3\}.
+\end{equation}
+The motivation was to give boundary decoded points access to nearby original
+points that fall just outside the patch bounding box.
+
+\paragraph{Failure: Reverse term dominates.}
+With $d = 10$, the crop $\pc^*_{\text{crop}}$ is significantly larger than
+$\hat{\pc}_{\text{patch}}$.
+Boundary decoded points near the edge of the patch find their nearest original
+point at distance $\approx d$ voxels (outside the original patch boundary).
+The reverse term (original points to refined cloud) then contains many points
+far from any refined point, dominating the total loss.
+
+By epoch 3, the reverse term constitutes over 99\% of the total loss.
+The effective gradient tells the network: ``move all decoded points outward
+toward the patch boundary,'' which is a degenerate signal that prevents any
+geometric learning.
+
+Setting $d = 0$ (no boundary padding) fixes the problem.
+With zero padding the two terms are balanced, and the model learns correct
+displacements within 3--5 epochs.
+
+% ============================================================
+\subsection{Phase 8: Adaptive Rate Weighting (Kendall and Dynamic)}
+
+\paragraph{Approach.}
+Rather than manually setting rate weights $[w_2, w_4, w_6]$, we tried two
+principled alternatives from the multi-task learning literature:
+
+\begin{itemize}
+  \item \textit{Kendall uncertainty weighting~\cite{kendall2018multi}}: learns
+    per-task log-uncertainty parameters $\log\sigma_k$; the effective weight
+    is $w_k = 1/(2\sigma_k^2)$.
+
+  \item \textit{Dynamic detached weighting}: at each epoch, set
+    $w_k \propto \mathcal{L}_k / \bar{\mathcal{L}}$ (proportional to current
+    loss normalised by mean), clamped to $[0.1, 10.0]$.
+\end{itemize}
+
+\paragraph{Failure: Mismatch between rate learning dynamics.}
+The Kendall method failed catastrophically: within 5 epochs, the weights
+collapsed to the inverted ordering $w_2 < w_4 < w_6$.
+The reason is that Kendall's homoscedastic uncertainty is designed for tasks
+with genuinely different noise levels.
+Here, the r2 task has a larger Chamfer Distance loss (more displacement required)
+which Kendall interprets as higher uncertainty, causing it to \emph{downweight}
+the most important rate.
+This is the opposite of the correct inductive bias.
+
+The dynamic detached method converged to a nearly static ratio
+$\approx [1.27, 0.91, 0.82]$ by epoch 5.
+This ratio reflects the proportional learning progress across rates: since the
+shared backbone causes all rates to improve at proportional rates, the dynamic
+normaliser quickly stabilises.
+The best r2 edge improvement with dynamic weighting was $+1.28$~dB, compared
+to $+2.06$~dB with static weights.
+
+Adaptive weighting helps when tasks have decoupled learning dynamics, i.e.,
+when separate parameters handle each task.
+Here the shared backbone ties the rates together, so the static weights
+$[1.0, 0.3, 0.05]$, which encode the prior that r2 has the richest signal,
+cannot be recovered by any data-driven scheme applied to the shared loss.
+
+% ============================================================
+\subsection{Phase 9: Post-Hoc Curvature Scaling}
+
+\paragraph{Approach.}
+After the Chamfer Distance model achieved $+1.45$~dB at r2, we attempted to
+further boost edge improvements by post-hoc scaling: multiply the predicted
+displacement by $\alpha \kappa_i$ where $\kappa_i$ is the estimated surface
+curvature of point $\hat{p}_i$.
+The hypothesis was that the model's predictions at edge points would be amplified
+appropriately, recovering additional PSNR at the cost of flat-region quality.
+
+\paragraph{Failure: Model already correct.}
+For all scaling factors $\alpha > 1.0$ tested (1.2, 1.5, 2.0, 3.0), the D1
+PSNR decreased compared to no scaling.
+The reason: the model had already learned to apply larger displacements at
+edge regions (it observes the local coordinate structure and implicitly infers
+curvature).
+Post-hoc scaling on top of already-correct predictions produces
+\emph{over-correction}: edge points are pushed past the target surface,
+increasing the D1 error.
+
+The failure of post-hoc scaling was the first evidence that the network was
+already learning curvature-adaptive behaviour from the coordinate features
+alone, which motivated the curvature input ablation (Section~\ref{ssec:ablation-curvature}).
+
+% ============================================================
+\subsection{Summary of Key Lessons}
+
+Table~\ref{tab:failed-approaches} summarises the failed approaches and the
+lesson each contributed to the final design.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Summary of failed approaches and their contributions to the final design.
+    ``Gain'' is the approximate r2 edge PSNR improvement over the unrefined baseline.
+  }
+  \label{tab:failed-approaches}
+  \small
+  \begin{tabular}{llp{5.5cm}}
+    \toprule
+    \textbf{Approach} & \textbf{r2 Edge Gain} & \textbf{Key Lesson} \\
+    \midrule
+    L1 displacement regression & $< 0.05$~dB & Zero-inflation collapse is structural \\
+    Smooth-L1 & $< 0.05$~dB & Gradient bias unchanged \\
+    Curvature-weighted L1 & $\approx 0.1$~dB & Partial but insufficient fix \\
+    Min-of-$K$ targets & $\approx 0.1$~dB & Fixes NN noise but not zero-collapse \\
+    Gated architecture & $\approx 0.15$~dB & Gate collapses for same reason \\
+    Stratified loss & $\approx 0.4$~dB & Conflates two independent problems \\
+    Laplacian preservation & $\approx 0.0$~dB & Laplacian of decoded cloud is corrupt \\
+    CD + Laplacian & $\approx 1.1$~dB & CD is already self-regularising \\
+    Deep FiLM on all ResBlocks & plateau & Gradient conflict in shared backbone \\
+    CD with boundary padding=10 & negative & Reverse term dominates; degenerate gradient \\
+    Kendall rate weighting & worse & Inverts the correct inductive bias \\
+    Post-hoc curvature scaling & negative & Model already rate-curvature adaptive \\
+    \midrule
+    \textbf{Final: CD + head FiLM + static weights} & $\mathbf{+2.06}$~dB & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The progression from $< 0.05$~dB (L1 collapse) to $+2.06$~dB (final model)
+is entirely explained by identifying and resolving three independent failure
+modes: (1) zero-inflation in the loss, (2) gradient conflict in the architecture,
+and (3) boundary artifacts in the patch sampling.
+No single change was sufficient; each required the previous fix to be in place
+before its benefit could be observed.
+
+% ============================================================
+\begin{table}[t]
+  \centering
+  \caption{%
+    Summary of the final post-processing model (v10-nocurv, epoch 24 checkpoint).
+  }
+  \label{tab:model-summary}
+  \small
+  \begin{tabular}{ll}
+    \toprule
+    \textbf{Component} & \textbf{Configuration} \\
+    \midrule
+    \multicolumn{2}{l}{\textit{Input}} \\
+    Features & 3-channel normalised $(x, y, z)$ coordinates \\
+    Patch size & $64^3$ voxels, stride 32 (50\% overlap) \\
+    Augmentation & 48 cube symmetries (uniform random) \\
+    \midrule
+    \multicolumn{2}{l}{\textit{Backbone}} \\
+    Architecture & 3-level sparse U-Net (MinkowskiEngine) \\
+    Channels & 32 / 64 / 128 (encoder); 128 / 64 / 32 (decoder) \\
+    Kernel size & $3^3$ submanifold sparse convolution \\
+    Downsampling & Stride-2 sparse convolution (\textit{E}$_2$, \textit{E}$_3$) \\
+    Skip connections & Feature concat at resolutions 1$\times$, 2$\times$ \\
+    \midrule
+    \multicolumn{2}{l}{\textit{Rate Conditioning}} \\
+    Rate input & $r = \log_2(\bpp)$, scalar \\
+    Rate MLP & Linear(1,64) + ReLU + Linear(64,64) \\
+    FiLM output & $\boldsymbol{\gamma} \in \R^{32}$, $\boldsymbol{\beta} \in \R^{32}$ \\
+    Modulation & Channel-wise: $\mathbf{h}' = \boldsymbol{\gamma} \odot \mathbf{h} + \boldsymbol{\beta}$ \\
+    \midrule
+    \multicolumn{2}{l}{\textit{Output}} \\
+    Head & SparseConv $1^3$, then $5 \cdot \tanh(\cdot)$ \\
+    Output & Per-point displacement $\Delta_i \in [-5, 5]^3$ \\
+    \midrule
+    \multicolumn{2}{l}{\textit{Loss}} \\
+    Loss function & Symmetric Chamfer Distance, chamfer\_padding=0 \\
+    Rate weights & $[w_2, w_4, w_6] = [1.0, 0.3, 0.05]$ \\
+    \midrule
+    \multicolumn{2}{l}{\textit{Training}} \\
+    Optimiser & AdamW ($\eta = 10^{-3}$, $\lambda = 10^{-4}$) \\
+    Schedule & 3-epoch warm-up + cosine annealing, 30 epochs \\
+    Batch size & 8 patches \\
+    Total parameters & $\approx 2.5\text{M}$ \\
+    Best checkpoint & Epoch 24 (validation loss) \\
+    \bottomrule
+  \end{tabular}
+\end{table}

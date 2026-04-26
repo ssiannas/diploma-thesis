@@ -1,0 +1,209 @@
+\section{Loss Function Design}
+\label{sec:loss}
+
+\subsection{Displacement Regression Losses: Why They Fail}
+
+The naive approach is to train the network to minimise the L1 (or L2) distance
+between predicted displacements and precomputed nearest-neighbour targets:
+\begin{equation}
+  \mathcal{L}_{\text{L1}} = \frac{1}{N}\sum_{i=1}^{N}
+    \left\|\Delta_i - d_{gt}(\hat{p}_i)\right\|_1,
+  \qquad d_{gt}(\hat{p}_i) = p^*_{nn}(\hat{p}_i) - \hat{p}_i.
+\end{equation}
+
+This fails due to two structural problems:
+
+\paragraph{Problem 1: Zero-inflation.}
+At r2, 60\% of decoded points have $d_{gt}(\hat{p}_i) = \mathbf{0}$
+(already at a correct voxel position).
+The optimal constant predictor that minimises the L1 loss is the coordinate-wise
+median of the targets.
+When the median of 60\% of targets is zero, the optimal constant prediction
+is $\mathbf{0}$ for each coordinate.
+The gradient signal from the 40\% non-zero targets is overwhelmed by the 60\%
+zero targets pulling the prediction toward zero.
+In practice, any network trained with this loss collapses to predicting near-zero
+for all points --- the \emph{zero-inflation failure mode}.
+
+We verified this empirically: networks trained with L1, smooth-L1, and
+curvature-weighted L1 all collapse to near-zero predictions within 5--10 epochs,
+producing negative or negligible PSNR improvement (Table~\ref{tab:ablation-loss}).
+Figure~\ref{fig:zero-inflation} illustrates the zero-inflation problem and how
+it worsens with rate: at r6, 87\% of decoded points have zero displacement
+target, leaving almost no learnable signal.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.88\textwidth]{zero_inflation.pdf}
+  \caption{%
+    Displacement signal statistics at training rates.
+    \textbf{Left}: fraction of decoded points with ground-truth displacement
+    $\|d_{gt}\| = 0$ (already correctly placed).
+    \textbf{Right}: mean displacement magnitude.
+    At r2 (the richest training rate), 60\% of targets are zero and the
+    mean displacement is only 0.15 voxels.
+    At r6, 87\% zero inflation leaves almost no gradient signal for
+    displacement losses.
+  }
+  \label{fig:zero-inflation}
+\end{figure}
+
+\paragraph{Problem 2: Nearest-neighbour noise.}
+Even the 40\% non-zero targets are unreliable at edge regions.
+At a decoded point $\hat{p}$ near a sharp feature, the nearest neighbour in
+$\pc^*$ is not well-defined: a small perturbation of $\hat{p}$ can flip its
+nearest neighbour from one side of the edge to the other, producing a
+discontinuous jump in $d_{gt}$.
+This instability is most severe at exactly the locations where correction
+is most needed (high-curvature regions), causing the gradient signal to be
+noisiest where it should be most informative.
+
+\subsection{Dynamic Chamfer Distance}
+\label{ssec:dcd}
+
+We resolve both problems by abandoning precomputed per-point targets entirely
+and directly minimising the geometric discrepancy between the refined patch
+and the corresponding crop of the original cloud.
+
+\paragraph{Patch extraction.}
+The point cloud is divided into overlapping cubic patches of $64^3$ voxels
+with stride 32.
+For each patch of decoded points $\hat{\pc}_{\text{patch}} \subset \hat{\pc}$,
+the corresponding crop of the original cloud is:
+\begin{equation}
+  \pc^*_{\text{crop}} = \{p^* \in \pc^* : p^* \in [u_{\min},\, u_{\max}]^3\},
+\end{equation}
+where $[u_{\min}, u_{\max}]^3$ is the axis-aligned bounding box of
+$\hat{\pc}_{\text{patch}}$ with \emph{zero} padding.
+
+\paragraph{Loss computation.}
+Let $\hat{\pc}_{\text{ref}} = \{\hat{p}_i + \Delta_i : \hat{p}_i \in \hat{\pc}_{\text{patch}}\}$
+be the refined patch.
+The per-patch loss is the symmetric Chamfer Distance:
+\begin{equation}
+  \mathcal{L}_{\text{CD}} =
+    \frac{1}{|\hat{\pc}_{\text{ref}}|}\sum_{\hat{p} \in \hat{\pc}_{\text{ref}}}
+      \min_{p^* \in \pc^*_{\text{crop}}} \|\hat{p} - p^*\|^2
+    + \frac{1}{|\pc^*_{\text{crop}}|}\sum_{p^* \in \pc^*_{\text{crop}}}
+      \min_{\hat{p} \in \hat{\pc}_{\text{ref}}} \|p^* - \hat{p}\|^2.
+  \label{eq:cd-loss}
+\end{equation}
+
+Figure~\ref{fig:chamfer-diagram} illustrates the two terms of the symmetric
+Chamfer Distance and why symmetry is essential.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[>=Stealth, every node/.style={font=\small}, scale=0.95]
+  % ---- Forward term: refined -> original ----
+  \begin{scope}
+    \node[font=\small\bfseries] at (2.2, 3.1) {Forward: $\hat{\mathcal{P}}_\text{ref} \to \mathcal{P}^*$};
+    % Original cloud (green dots, curve shape)
+    \foreach \x/\y in {0.5/1.5, 1.0/2.0, 1.5/2.4, 2.0/2.5, 2.5/2.4,
+                        3.0/2.0, 3.5/1.5, 4.0/1.2} {
+      \fill[green!60!black] (\x,\y) circle (3pt);
+    }
+    % Refined points (blue dots, slightly off)
+    \foreach \x/\y in {0.6/1.0, 1.2/1.5, 1.8/1.9, 2.4/1.8, 3.1/1.4} {
+      \fill[blue!70] (\x,\y) circle (3pt);
+    }
+    % Forward arrows (blue to nearest green)
+    \draw[->, red!70, dashed] (0.6,1.0) -- (0.5,1.5);
+    \draw[->, red!70, dashed] (1.2,1.5) -- (1.0,2.0);
+    \draw[->, red!70, dashed] (1.8,1.9) -- (1.5,2.4);
+    \draw[->, red!70, dashed] (2.4,1.8) -- (2.5,2.4);
+    \draw[->, red!70, dashed] (3.1,1.4) -- (3.0,2.0);
+  \end{scope}
+
+  % ---- Reverse term: original -> refined ----
+  \begin{scope}[xshift=6.5cm]
+    \node[font=\small\bfseries] at (2.2, 3.1) {Reverse: $\mathcal{P}^* \to \hat{\mathcal{P}}_\text{ref}$};
+    % Original cloud
+    \foreach \x/\y in {0.5/1.5, 1.0/2.0, 1.5/2.4, 2.0/2.5, 2.5/2.4,
+                        3.0/2.0, 3.5/1.5, 4.0/1.2} {
+      \fill[green!60!black] (\x,\y) circle (3pt);
+    }
+    % Refined points
+    \foreach \x/\y in {0.6/1.0, 1.2/1.5, 1.8/1.9, 2.4/1.8, 3.1/1.4} {
+      \fill[blue!70] (\x,\y) circle (3pt);
+    }
+    % Reverse arrows (green to nearest blue) — note: some green points far from any blue
+    \draw[->, orange!80, dashed] (0.5,1.5) -- (0.6,1.0);
+    \draw[->, orange!80, dashed] (1.0,2.0) -- (1.2,1.5);
+    \draw[->, orange!80, dashed] (1.5,2.4) -- (1.8,1.9);
+    \draw[->, orange!80, dashed] (2.0,2.5) -- (1.8,1.9);
+    \draw[->, orange!80, dashed] (2.5,2.4) -- (2.4,1.8);
+    \draw[->, orange!80, dashed] (3.0,2.0) -- (3.1,1.4);
+    \draw[->, orange!80, thick, dashed] (3.5,1.5) -- (3.1,1.4);
+    \draw[->, orange!80, thick, dashed] (4.0,1.2) -- (3.1,1.4);
+    % Uncovered region annotation
+    \draw[red, thick] (3.3,0.9) ellipse (0.9cm and 0.35cm);
+    \node[red, font=\scriptsize, right] at (4.2, 0.9) {uncovered};
+  \end{scope}
+
+  % Shared legend -- centered below both panels (global coords)
+  \fill[green!60!black] (1.5, -0.35) circle (3pt);
+  \node[right, font=\small] at (1.65, -0.35) {Original $\mathcal{P}^*$};
+  \fill[blue!70] (4.8, -0.35) circle (3pt);
+  \node[right, font=\small] at (4.95, -0.35) {Refined $\hat{\mathcal{P}}_\text{ref}$};
+  \draw[->, red!70, dashed] (8.2,-0.45) -- (8.7,-0.25);
+  \node[right, font=\small] at (8.75,-0.35) {NN match};
+\end{tikzpicture}
+\caption{%
+  Symmetric Chamfer Distance.
+  \textbf{Left (forward term)}: each refined point finds its nearest original point.
+  Penalises refined points that are far from the surface.
+  \textbf{Right (reverse term)}: each original point finds its nearest refined point.
+  Penalises surface regions not covered by the refined cloud (circled).
+  Together, both terms enforce that the refined cloud is close to and covers
+  the original surface.
+}
+\label{fig:chamfer-diagram}
+\end{figure}
+
+\paragraph{Why this resolves zero-inflation.}
+The loss in Equation~\ref{eq:cd-loss} is not computed per-point against a
+fixed precomputed target; it is computed over the entire refined set.
+For a point $\hat{p}_i$ that is already correctly placed (optimal
+$\Delta_i = \mathbf{0}$), its nearest-neighbour distance to $\pc^*_{\text{crop}}$
+is already minimal, and the gradient contribution from this point is near zero.
+The gradient is therefore concentrated on the \emph{incorrectly placed}
+points --- those that are far from their nearest counterpart in $\pc^*_{\text{crop}}$ ---
+regardless of what fraction of points are zero.
+Zero-inflation does not bias the gradient.
+
+\paragraph{Why this resolves nearest-neighbour noise.}
+In Equation~\ref{eq:cd-loss}, the nearest-neighbour matching is performed
+on the \emph{refined} positions $\hat{p}_i + \Delta_i$, not the fixed
+decoded positions.
+As the network updates $\Delta_i$ during training, the matching adapts
+accordingly.
+This is the ``dynamic'' aspect of the loss: matching is re-computed at
+every training step.
+The instability of 1-NN at edge regions does not propagate because the
+network is free to move points to any position within $[-5, 5]^3$ and the
+matching will find the globally optimal nearest neighbour at each step.
+
+\paragraph{Critical implementation detail: zero boundary padding.}
+The crop $\pc^*_{\text{crop}}$ must be extracted with \emph{exactly the same}
+bounding box as $\hat{\pc}_{\text{patch}}$, i.e., zero padding.
+
+To see why, consider what happens with non-zero padding of $d$ voxels:
+the bounding box of $\pc^*_{\text{crop}}$ is expanded by $d$ on each side.
+Boundary decoded points near the edge of the patch now have original points
+$d$ voxels \emph{outside} the patch, making the reverse term
+$\pc^*_{\text{crop}} \to \hat{\pc}_{\text{ref}}$ small (close to 0) regardless
+of predictions.
+The reverse term becomes negligible and the forward term
+$\hat{\pc}_{\text{ref}} \to \pc^*_{\text{crop}}$ dominates.
+This creates a gradient that pushes decoded points \emph{outward toward the
+patch boundary} (to get closer to the boundary-adjacent original points),
+a degenerate signal.
+
+We verified this empirically: with $d = 10$, the reverse term constitutes
+over 99\% of the total loss by epoch 3, and the model displaces all points
+toward the patch boundaries regardless of rate.
+With $d = 0$, the two terms are balanced and the model learns correct
+geometric corrections.
+
+% ============================================================

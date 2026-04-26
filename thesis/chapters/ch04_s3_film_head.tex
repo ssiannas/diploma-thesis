@@ -1,0 +1,81 @@
+\section{FiLM Rate Conditioning Head}
+\label{sec:film-head}
+
+\subsection{Rate Representation}
+
+The compression rate is represented as:
+\begin{equation}
+  r = \log_2(\bpp),
+\end{equation}
+where $\bpp$ is the bits per point of the compressed bitstream.
+The logarithmic transformation linearises the rate-distortion relationship:
+distortion typically scales as $2^{-\alpha r_{\text{linear}}}$ in bits per point,
+so $\log_2(\bpp)$ provides a scale on which equal intervals correspond to
+approximately equal changes in distortion.
+
+For the training set (r2, r4, r6 rate points), typical $\bpp$ values are
+approximately 0.04, 0.025, and 0.012, giving $r$ values of approximately
+$-4.6$, $-5.3$, and $-6.4$.
+The logarithmic scale spaces these more uniformly than the raw $\bpp$ values.
+
+\subsection{Rate MLP}
+
+A two-layer MLP maps the scalar $r$ to the FiLM parameters:
+\begin{equation}
+  \mathbf{e}(r) = \mathbf{W}_2\,\sigma(\mathbf{W}_1 r + \mathbf{b}_1) + \mathbf{b}_2
+  \in \R^{64}, \qquad \sigma = \text{ReLU},
+\end{equation}
+with $\mathbf{W}_1 \in \R^{64 \times 1}$, $\mathbf{W}_2 \in \R^{64 \times 64}$,
+$\mathbf{b}_1 \in \R^{64}$, $\mathbf{b}_2 \in \R^{64}$.
+The 64-dimensional embedding is split into the scale and shift vectors:
+$\boldsymbol{\gamma} = \mathbf{e}(r)_{1:32}$ and
+$\boldsymbol{\beta} = \mathbf{e}(r)_{33:64}$, each of dimension 32.
+
+The MLP adds $64 + 64 \times 64 + 64 = 4\,224$ parameters,
+approximately 0.17\% of the total model size.
+
+\subsection{Feature Modulation}
+
+The modulation is applied to every active voxel's feature vector $\mathbf{h}_i \in \R^{32}$
+at the first decoder level output:
+\begin{equation}
+  \mathbf{h}'_i = \boldsymbol{\gamma}(r) \odot \mathbf{h}_i + \boldsymbol{\beta}(r),
+  \qquad \forall i \in \{1, \ldots, N\}.
+\end{equation}
+The scaling $\boldsymbol{\gamma}(r)$ applies a per-channel amplitude rescaling
+that can amplify or suppress specific feature dimensions depending on the rate.
+The shift $\boldsymbol{\beta}(r)$ adds a per-channel bias, effectively
+adjusting the ``resting state'' of the features at each rate.
+
+\paragraph{What FiLM learns.}
+At r2, where corrections are large, the FiLM layer is expected to amplify
+feature channels that detect surface discontinuities and suppress channels
+related to confident local geometry.
+At r6, where corrections are small, the amplitude should be lower overall,
+and the pattern of active channels may differ.
+The MLP can learn any continuous function of $r$ within its capacity,
+allowing rate-specific feature representations without storing separate weights
+per rate.
+
+\subsection{Displacement Head}
+
+The modulated 32-channel feature maps are passed through a final $1^3$ sparse
+convolution (same-resolution, no submanifold constraint needed here since we
+output per-active-coordinate values), followed by $\tanh$ scaling:
+\begin{equation}
+  \Delta_i = 5 \cdot \tanh\!\left(\mathbf{W}_{\text{head}} \mathbf{h}'_i + \mathbf{b}_{\text{head}}\right),
+  \qquad \mathbf{W}_{\text{head}} \in \R^{3 \times 32},\; \mathbf{b}_{\text{head}} \in \R^3.
+\end{equation}
+
+The output displacement is added to the integer input coordinate to
+produce the refined position in continuous $\R^3$:
+\begin{equation}
+  \hat{p}^{\text{ref}}_i = \hat{p}_i + \Delta_i.
+\end{equation}
+Note that the refined positions are in $\R^3$, not $\mathbb{Z}^3$:
+the output point cloud is a floating-point cloud, not a voxelized integer grid.
+For codec comparison and metric computation, the refined cloud is compared
+directly with the original (which is also in integer voxel coordinates)
+using the standard nearest-neighbour PSNR computation.
+
+% ============================================================

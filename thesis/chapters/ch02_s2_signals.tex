@@ -1,0 +1,191 @@
+\section{From 1D Signals to 3D Geometry: Evolution of Representation Learning}
+\label{sec:signal-progression}
+
+\subsection{1D Signals: Audio Processing and Sequential Data}
+
+Audio waveforms were the first domain where the interplay between
+sampling theory, transform design, and perceptual coding was worked out
+rigorously, and the same ideas recur in 2D and 3D.
+The Nyquist-Shannon sampling theorem~\cite{shannon1949noise} establishes
+the foundational link between continuous and discrete representations:
+a bandlimited signal $x(t)$ with maximum frequency $f_{\max}$ is perfectly
+reconstructable from its samples $x[n]$ provided the sampling rate exceeds
+$2f_{\max}$.
+Without this result, the entire chain from ADC to digital storage to playback
+is undefined.
+
+Traditional audio codecs (MP3, AAC) exploit the mismatch between signal
+information content and the resolution of human auditory perception.
+The Modified Discrete Cosine Transform (MDCT)~\cite{princen1987mdct} decomposes overlapping frames
+into frequency subbands; coefficients in less perceptually sensitive bands
+are quantised more coarsely; the result is entropy-coded.
+Designing the perceptual weighting functions required decades of
+psychoacoustic research.
+
+Deep learning replaced hand-crafted transforms with learned ones.
+WaveNet~\cite{oord2016wavenet} modelled the raw audio waveform
+autoregressively using dilated causal convolutions with exponentially growing
+receptive fields, generating high-quality speech.
+HiFi-GAN~\cite{kong2020hifigan} applied a generative adversarial network (GAN)
+trained directly on waveforms to achieve real-time high-fidelity synthesis.
+The core operation in all these systems is the 1D convolution:
+a kernel $\mathbf{w} \in \R^k$ slides over the sequence
+$x[n]$ to produce:
+\begin{equation}
+  y[n] = \sum_{i=0}^{k-1} w[i] \cdot x[n - i].
+\end{equation}
+Dilation by factor $d$ skips samples:
+$y[n] = \sum_{i=0}^{k-1} w[i] \cdot x[n - d\cdot i]$,
+exponentially expanding the receptive field without proportionally increasing
+the parameter count.
+
+\subsection{2D Signals: Image Understanding and Convolutional Networks}
+
+Images extend 1D signals to a 2D regular grid $x[m, n]$ of pixel intensities.
+The Discrete Cosine Transform (DCT), applied blockwise, underpins JPEG
+compression; the H.264/H.265 family adds inter-frame motion compensation for
+video.
+Both systems are built on expert-crafted transforms: the DCT was chosen
+for its energy-compaction properties; motion estimation is heuristic.
+
+The revolution in image understanding came from \emph{learning} the transforms
+directly from data.
+A 2D convolution slides a learnable kernel
+$\mathbf{W} \in \R^{k \times k \times C_{in} \times C_{out}}$
+over the input to produce feature maps:
+\begin{equation}
+  y_{c'}[m, n] = \sum_{c=1}^{C_{in}} \sum_{i=-\lfloor k/2\rfloor}^{\lfloor k/2\rfloor}
+    \sum_{j=-\lfloor k/2\rfloor}^{\lfloor k/2\rfloor}
+    W_{c,c'}[i, j] \cdot x_c[m+i,\, n+j].
+\end{equation}
+The key structural property is \emph{weight sharing}: the same kernel is
+applied at every spatial location, reducing parameter count from $O(N^2)$
+to $O(k^2 C_{in} C_{out})$ relative to a fully connected layer.
+A direct consequence is \emph{translation equivariance}: shifting the input
+shifts the output by the same amount, so the network does not need to
+re-learn a detector at every position.
+Figure~\ref{fig:conv2d} illustrates the $3\times 3$ convolution operation.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[>=Stealth]
+  \def\cs{0.56}  % cell size
+  % ---- 5x5 input grid ----
+  \foreach \i in {0,...,4}
+    \foreach \j in {0,...,4} {
+      \pgfmathsetmacro\clr{int(18+mod(\i*7+\j*11,20))}
+      \fill[blue!\clr!white] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+      \draw[gray!50, very thin] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+    }
+  % Receptive field: rows i=1..3, cols j=1..3 — fully inside the grid
+  % x: [cs, 4*cs] = [0.56, 2.24];  grid x: [0, 5*cs=2.80]  ✓
+  % y: [-3*cs, 0] = [-1.68, 0];    grid y: [-4*cs=-2.24, cs=0.56]  ✓
+  \draw[red!80, very thick, rounded corners=1pt]
+    ({\cs},{-3*\cs}) rectangle ++({3*\cs},{3*\cs});
+  \node[font=\small, below] at ({2.5*\cs},{-5*\cs-0.06}) {Input $\mathbf{x}$};
+
+  % Convolution symbol — at the vertical centre of the 5x5 grid
+  \node[font=\large] at ({5*\cs+0.45},{-1.5*\cs}) {$*$};
+
+  % ---- 3x3 kernel (yshift=-\cs centres it on the 5x5 input) ----
+  \begin{scope}[xshift={5*\cs cm + 0.85cm}, yshift={-\cs cm}]
+    \foreach \i in {0,...,2}
+      \foreach \j in {0,...,2} {
+        \fill[orange!28] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+        \draw[orange!60] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+        \node[font=\tiny] at ({\j*\cs+0.5*\cs},{-\i*\cs+0.5*\cs}) {$w_{\i\j}$};
+      }
+    \node[font=\small, below] at ({1.5*\cs},{-4*\cs-0.06}) {Kernel $\mathbf{w}$};
+  \end{scope}
+
+  % Equals sign
+  \node[font=\large] at ({5*\cs+0.85+3*\cs+0.45},{-1.5*\cs}) {$=$};
+
+  % ---- 3x3 output grid (yshift=-\cs centres it on the 5x5 input) ----
+  \begin{scope}[xshift={5*\cs cm + 0.85cm + 3*\cs cm + 0.85cm}, yshift={-\cs cm}]
+    \foreach \i in {0,...,2}
+      \foreach \j in {0,...,2} {
+        \fill[green!18] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+        \draw[green!55!black] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+      }
+    % Highlighted output cell corresponding to the RF (row 1, col 1)
+    \fill[green!55] ({\cs},{-\cs}) rectangle ++({\cs},{\cs});
+    \node[font=\small, below] at ({1.5*\cs},{-4*\cs-0.06}) {Output $\mathbf{y}$};
+  \end{scope}
+\end{tikzpicture}
+\caption{%
+  A $3{\times}3$ convolution on a $5{\times}5$ input feature map.
+  The kernel (orange) slides over the input, computing a dot product at each
+  position to produce one output value (green).
+  The highlighted receptive field (red border) shows the input region that
+  contributes to one output position.
+}
+\label{fig:conv2d}
+\end{figure}
+
+Stacking convolutional layers with interleaved non-linearities and spatial
+downsampling (max pooling, strided convolution) builds a hierarchy of features
+whose receptive field grows with depth.
+AlexNet~\cite{krizhevsky2012alexnet} was the first to demonstrate on ImageNet that this learned
+hierarchy dramatically outperforms hand-crafted feature pipelines; VGG,
+GoogLeNet, and ResNet~\cite{he2016deep} subsequently showed that depth and
+efficient skip-connection design were the main levers for further gains.
+
+The key architectural innovation that made very deep networks trainable was
+the residual block.
+Instead of learning a mapping $\mathbf{H}(\mathbf{x})$ from input to output,
+a residual block learns the residual $\mathbf{F}(\mathbf{x}) = \mathbf{H}(\mathbf{x}) - \mathbf{x}$
+and adds the identity:
+\begin{equation}
+  \mathbf{H}(\mathbf{x}) = \mathbf{F}(\mathbf{x}) + \mathbf{x}.
+\end{equation}
+This reformulation makes it easy for the network to learn the identity mapping
+(by setting $\mathbf{F} = \mathbf{0}$), which ensures that adding more layers
+cannot hurt performance.
+Residual connections also provide a direct gradient path from the output to
+early layers, alleviating the vanishing gradient problem.
+
+For dense prediction tasks (segmentation, depth estimation, image restoration),
+the output resolution must match the input.
+U-Net~\cite{ronneberger2015unet} introduced the encoder-decoder with skip
+connections: an encoder path progressively downsamples with strided
+convolutions (or pooling), building a compact high-level representation;
+a symmetric decoder path progressively upsamples; at each resolution level,
+skip connections concatenate encoder features to decoder inputs, preserving
+fine-scale spatial detail.
+\begin{equation}
+  \mathbf{h}^{(dec)}_\ell = f_\ell^{dec}\!\left(
+    [\,\mathbf{h}^{(enc)}_\ell\, ;\, \text{upsample}(\mathbf{h}^{(dec)}_{\ell+1})\,]\right),
+\end{equation}
+where $[\cdot\,;\,\cdot]$ denotes channel concatenation.
+
+Learned compression extended the same encoder-decoder idea to the
+rate-distortion problem.
+Ballé et al.~\cite{balle2018variational} replaced the hand-crafted DCT
+with a learned CNN encoder-decoder and introduced the \emph{hyperprior}:
+a second entropy model that codes the scale parameters of the main latent
+distribution, capturing spatial correlations in the quantised latent.
+Minnen et al.~\cite{minnen2018joint} added an autoregressive prior that
+conditions each latent element on previously decoded context, further
+improving entropy coding efficiency.
+These systems now surpass JPEG-2000 on standard benchmarks and provided
+the blueprint for learned point cloud codecs (Section~\ref{sec:compression}).
+
+\subsection{3D Data: Geometric Representations and the Sparsity Challenge}
+
+Extending image-like deep learning to 3D confronts an immediate structural
+problem: the spatial data is \emph{sparse and irregular}.
+A $512 \times 512$ image contains exactly $262\,144$ pixels in a regular grid.
+The same scene at the same spatial resolution in 3D would occupy a
+$512^3 \approx 134\,\text{M}$ voxel grid, of which fewer than 1\% are
+occupied by surface points.
+Applying standard 3D convolutions at this resolution requires $\sim$512 GB
+of memory for feature maps at a modest 64 channels --- clearly impractical.
+
+Processing only the occupied subset requires representations that make
+sparsity explicit rather than storing an empty grid.
+The three principal approaches to this are surveyed in
+Section~\ref{sec:3d-representations}.
+
+
+% ============================================================

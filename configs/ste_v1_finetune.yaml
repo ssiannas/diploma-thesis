@@ -1,0 +1,44 @@
+# STE fine-tune of paper model (film_v10_nocurv_ep24_best.pt)
+# Adds STE rounding to forward pass: d_int = d + (round(d) - d).detach()
+# Forces integer outputs while keeping CD loss and geometry understanding.
+# Fresh optimizer (weight_decay lowered to avoid over-regularizing fine-tune).
+data:
+  data_root: datasets/pcgcv2_decoded
+  rates: [r2, r4, r6]
+  val_sequence: redandblack
+  patch_size: 64
+  stride: 32
+  min_points: 100
+  curvature_k: 30
+  max_clouds: null
+  frame_stride: 12
+  augment: true
+  use_curvature: false
+  overfit: false
+  rate_jitter: 0.0
+
+model:
+  model_type: film_head_v2
+  max_displacement: 5.0
+  film_embed_dim: 64
+  film_rate_repr: bpp
+  quantize_output: true   # enables STE rounding in forward pass
+
+loss:
+  loss_type: cd
+  chamfer_padding: 0
+  cd_fwd_weight: 1.0
+  cd_rev_weight: 1.0
+  rate_weights: [1.0, 0.3, 0.05]
+
+batch_size: 16
+lr: 1.0e-5
+warmup_epochs: 2
+epochs: 30
+num_workers: -1
+device: cuda
+save_dir: models/postprocessing/ste_v1_finetune
+weight_decay: 1.0e-4
+rate_stratified: false
+encoder_lr_scale: 1.0
+pretrained_backbone: models/postprocessing/good_candidates/film_v10_nocurv_ep24_best.pt

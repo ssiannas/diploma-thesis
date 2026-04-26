@@ -1,0 +1,273 @@
+% ============================================================
+%  Chapter -- Related Work
+% ============================================================
+\chapter{Related Work}
+\label{ch:related}
+
+This chapter surveys the body of prior work most relevant to the three
+pillars of this thesis: learned point cloud compression, post-processing
+of compressed 3D geometry, and rate-conditioned neural networks.
+
+% ============================================================
+\section{Learned Point Cloud Compression}
+\label{sec:related-compression}
+
+\subsection{Voxel-Based Learned Codecs}
+
+The first generation of learned point cloud codecs, pioneered by
+Quach et al.~\cite{quach2019learning} and Wang et al.~\cite{wang2021multiscale},
+applied convolutional autoencoders to binary occupancy grids.
+PCGCv2 introduced a multi-scale architecture:
+the occupancy grid is processed by a cascade of sparse convolutional layers
+at progressively coarser resolutions, each level encoding a latent that
+is entropy-coded and transmitted.
+The decoder reconstructs the occupancy grid from the bottom up, conditioned
+on the decoded coarse representation.
+This coarse-to-fine strategy allows the codec to allocate bits efficiently
+across resolutions, with coarse geometry coded at low cost and fine details
+refined at the finer levels.
+
+SparsePCGC~\cite{wang2023sparsepcgc} extended PCGCv2 with fully sparse
+tensor representations throughout the latent hierarchy, replacing dense
+tensor operations with sparse ones at every scale.
+This reduces memory and computation for large-scale point clouds and improves
+rate-distortion efficiency.
+
+Unicorn~\cite{wang2025unicorn} represents the current state of the art among
+occupancy-based codecs, introducing universal multi-scale conditional coding
+with cross-scale and cross-position entropy model conditioning.
+Unicorn achieves strong rate-distortion performance at extreme compression
+rates (bpp $< 0.02$) that earlier codecs struggle to reach.
+Both SparsePCGC and Unicorn are relevant to this thesis: SparsePCGC is the
+direct architectural successor to PCGCv2 and shares its oversmoothing
+characteristics; Unicorn serves as the unseen-codec target for zero-shot
+transfer experiments (Section~\ref{sec:generalisation}).
+
+\subsection{Density-Adaptive and Point-Based Methods}
+
+An alternative to voxel-based approaches is to operate directly on
+continuous point coordinates.
+He et al.~\cite{he2022density} identified the density-aware bottleneck:
+existing codecs fail to adapt their bit allocation to spatially variable
+point densities, leading to quality imbalances similar to the oversmoothing
+documented in this thesis (though they focus on density rather than curvature).
+Their density-adaptive codec explicitly models density variation in the
+entropy model.
+
+Point-cloud codecs based on learned local feature descriptors (folding
+networks~\cite{yang2018foldingnet}, flow-based
+models~\cite{yang2019pointflow}) have been proposed but generally lag behind
+occupancy-based methods on the MPEG evaluation benchmarks.
+
+\subsection{MPEG Standardisation Activity}
+
+The MPEG standardisation process has evaluated both G-PCC~\cite{graziosi2020gpcc}
+and V-PCC~\cite{schwarz2018emerging} as the two principal traditional
+standards.
+G-PCC covers geometry compression for sparsely sampled (LiDAR) content
+via octree coding, while V-PCC addresses dense volumetric video via 2D atlas
+projection.
+The call for proposals on learned point cloud compression~\cite{mpeg2024cfp}
+(MPEG-PCC CfP, 2024) evaluated several learned codecs including SparsePCGC
+and Unicorn against the G-PCC baseline, with learned codecs showing
+consistent advantages at low bitrates.
+
+% ============================================================
+\section{Post-Processing for Compressed 3D Content}
+\label{sec:related-postprocessing}
+
+Table~\ref{tab:related-comparison} positions the approach of this thesis
+relative to the most closely related post-processing methods along the
+key design dimensions.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Comparison of learned post-processing approaches for compressed 3D geometry.
+    \textbf{Standalone}: no access to codec internals required.
+    \textbf{Multi-rate}: single model covers multiple rate points.
+    \textbf{Learned codec}: targets a learned (occupancy) codec.
+  }
+  \label{tab:related-comparison}
+  \small
+  \begin{tabular}{lcccl}
+    \toprule
+    \textbf{Method} & \textbf{Standalone} & \textbf{Multi-rate} & \textbf{Learned codec} & \textbf{Artifact type} \\
+    \midrule
+    Fan et al.~\cite{fan2022deep}     & \checkmark & $\times$ & $\times$ & G-PCC quant. noise \\
+    GRASP-Net~\cite{pang2022graspnet} & \checkmark & $\times$ & $\times$ & G-PCC quant. noise \\
+    Guarda et al.~\cite{guarda2025deep} & $\times$ & \checkmark & \checkmark & Learned codec \\
+    Xu et al.~\cite{xu2024fast}       & $\times$ & \checkmark & \checkmark & Learned codec \\
+    \textbf{Ours (FiLM post-proc.)}   & \checkmark & \checkmark & \checkmark & Oversmoothing \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Post-Processing for G-PCC Geometry}
+
+Fan et al.~\cite{fan2022deep} proposed a graph neural network for
+post-processing G-PCC decoded geometry.
+The network constructs a local graph on the decoded point cloud and applies
+graph convolutions to estimate per-point corrections.
+On the MPEG evaluation sequences, the method achieves BD-PSNR improvements
+of 1--2~dB.
+However, this approach is designed for G-PCC's quantisation-noise artifact
+profile and does not address the spatially biased oversmoothing of learned
+codecs.
+
+Pang et al.~\cite{pang2022graspnet} proposed GRASP-Net, a residual analysis
+and synthesis network for G-PCC geometry enhancement.
+GRASP-Net uses a graph-based local feature extractor and a residual decoder
+to predict point-level corrections from the decoded cloud.
+Like Fan et al., this is tailored to G-PCC artifacts.
+
+\subsection{Integrated Refinement in Learned Codecs}
+
+Guarda et al.~\cite{guarda2025deep} and Xu et al.~\cite{xu2024fast} propose
+refinement modules that are integrated directly into the learned codec
+decoder, rather than operating as a standalone post-processor.
+These approaches modify the codec architecture and require joint training of
+the codec and refinement components.
+They achieve stronger per-codec improvements but cannot be applied to
+pre-trained or black-box codecs.
+Our approach, by contrast, is a standalone post-processor that requires no
+access to the codec internals and can be applied to any codec's output.
+
+\subsection{Attribute Enhancement}
+
+Concurrent work on attribute (colour) post-processing~\cite{ugae2025} targets
+colour restoration after geometric compression.
+The method takes the decoded point cloud (with colour attributes) and a
+reference geometry (if available) to enhance colour fidelity.
+This is complementary to geometric post-processing: an ideal system would
+jointly refine both geometry and colour.
+
+\subsection{Analogy with Image Compression Artefact Removal}
+
+The problem of removing compression artifacts from images has a longer
+history.
+Deep learning approaches (ARCNN~\cite{dong2015compression}, DnCNN~\cite{zhang2017dncnn})
+demonstrated that convolutional networks can effectively reduce JPEG blocking
+and ringing artifacts, learning to invert the characteristic distortions of
+DCT-based compression.
+The analogy motivates the learned post-processing approach for point cloud
+codecs, but the 3D sparse structure and the non-uniform spatial distribution
+of artifacts (concentrated at edges, not uniformly distributed) require
+specialised architectures.
+
+% ============================================================
+\section{Rate-Conditioned and Multi-Rate Neural Networks}
+\label{sec:related-rate}
+
+\subsection{Variable-Rate Learned Image Compression}
+
+In learned image compression, achieving multiple rate-distortion operating
+points with a single model (rather than training separate models per rate)
+is an active research area.
+Choi et al.~\cite{choi2019variable} proposed conditioning the entropy model
+on a quantisation step size to achieve variable-rate compression.
+Cui et al.~\cite{cui2021asymmetric} introduced asymmetric gained autoencoders,
+using learned gain factors to scale the latent representation.
+Song et al.~\cite{song2021variable} and Li et al.~\cite{li2024neural} further
+developed variable-rate mechanisms based on gain units and neural substitutions.
+
+In each case, a scalar or vector conditioning signal shifts the codec's
+rate-distortion operating point without retraining.
+FiLM conditioning serves the same purpose here: a scalar rate input modulates
+intermediate features via affine transformation, and a single model covers a
+range of operating points.
+
+\subsection{Feature-wise Linear Modulation in Context}
+
+FiLM~\cite{perez2018film} was originally introduced for visual question
+answering, where language embeddings modulate visual features to enable
+compositional reasoning.
+The closest structural precedent to the present work is multi-domain
+adaptation~\cite{rebuffi2018efficient}, where a shared backbone handles
+multiple visual domains by inserting per-domain FiLM layers --- the same
+parameter-sharing argument that motivates using a single model across
+rate-distortion operating points here.
+TADAM~\cite{oreshkin2018tadam} used the same mechanism for few-shot learning:
+a task embedding predicted at meta-test time steers intermediate features
+without updating backbone weights, demonstrating that FiLM provides a
+clean interface between a discrete or continuous conditioning variable and
+a fixed-backbone computation.
+In this thesis the conditioning signal is the log-BPP scalar of the decoded
+cloud, and the goal is for a single model to cover the full range of
+compression rates without per-rate weight copies.
+
+\subsection{Multi-Task Learning and Loss Weighting}
+
+Training a model on multiple related tasks or multiple operating conditions
+(as in multi-rate training) raises the question of how to balance task losses.
+Kendall et al.~\cite{kendall2018multi} proposed weighting losses by the
+homoscedastic uncertainty of each task, treating the task weights as learned
+parameters.
+Chen et al.~\cite{chen2018gradnorm} proposed GradNorm, normalising task
+gradient magnitudes to ensure balanced learning rates.
+These methods assume that tasks can decouple their learning dynamics,
+which requires either task-specific parameters or batch-level gradient
+separation.
+
+In this work, all rates share the backbone, preventing decoupled learning
+dynamics.
+The ablation in Section~\ref{ssec:ablation-weighting} confirms that adaptive
+weighting schemes are not beneficial in this setting, and that the correct
+prior --- expressed by static weights $[1.0, 0.3, 0.05]$ --- outperforms
+all alternatives.
+
+% ============================================================
+\section{Quality Metrics for Point Cloud Compression}
+\label{sec:related-metrics}
+
+\subsection{Standard MPEG Metrics}
+
+Point cloud quality has been standardly measured by D1 PSNR
+(point-to-point nearest-neighbour error)~\cite{tian2017geometric}
+and D2 PSNR (point-to-plane error).
+Both metrics aggregate error uniformly over the surface, without regard to
+local geometric complexity.
+
+\subsection{Perceptual Quality Studies}
+
+Subjective quality studies~\cite{ak2024basics,prazeres2024quality} have
+documented that standard aggregate metrics fail to predict human perceptual
+quality judgements for learned codec output.
+In particular, geometric artifacts that concentrate at high-curvature
+regions (edges, ridges) are perceptually more annoying than equivalent-MSE
+errors distributed uniformly.
+These studies motivate the development of geometry-aware metrics that weight
+errors by their perceptual relevance.
+
+The curvature-stratified PSNR introduced in this thesis is a step in this
+direction: it separates quality evaluation by surface geometry, exposing the
+edge degradation that aggregate metrics mask.
+A fully perceptual metric would require psychophysical experiments with human
+observers; the curvature-stratified metric is a computationally tractable
+approximation that correlates with perceptual importance.
+
+\subsection{Graph-Based and Feature-Based Metrics}
+
+Other works have proposed metrics based on local shape descriptors, point
+normal consistency, and graph spectral
+analysis~\cite{meynet2020pcqm,alexiou2018angular,yang2022graphsim}.
+PCQM~\cite{meynet2020pcqm} computes a multi-scale feature distance that
+correlates well with subjective quality judgements but requires building
+local geometric descriptors and performing pairwise distance comparisons
+at several spatial scales, with computation cost substantially exceeding
+that of a single nearest-neighbour search.
+GraphSIM~\cite{yang2022graphsim} constructs a graph over the decoded cloud
+and compares local gradient distributions via spectral analysis, adding
+graph construction and eigendecomposition overhead.
+Neither metric has been integrated into the MPEG evaluation toolchain,
+so their use requires custom implementations that are not reproducible
+across evaluation sites and whose results are not comparable to the
+published D1/D2 baselines.
+The curvature-stratified PSNR introduced in this thesis avoids these
+drawbacks: it extends the D1 nearest-neighbour computation---already
+executed as part of any standard quality evaluation---with a single $k$-NN
+PCA pass to assign each point to a curvature stratum.
+The additional cost is proportional to one extra $k$-NN query, the
+output is a pair of standard PSNR values that slot directly into existing
+reporting tables, and the stratification directly targets the spatially
+non-uniform artifact distribution that motivates this work.

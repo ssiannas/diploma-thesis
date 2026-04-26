@@ -1,0 +1,156 @@
+\section{Backbone: Sparse U-Net}
+\label{sec:backbone}
+
+\subsection{Architecture Overview}
+
+The backbone is a three-level sparse U-Net implemented with
+MinkowskiEngine~\cite{choy20194d}.
+Figure~\ref{fig:architecture} shows the full architecture including the
+FiLM conditioning head.
+The total parameter count is approximately 2.5 million.
+
+\begin{figure}[t]
+  \centering
+  \resizebox{0.98\textwidth}{!}{%
+  \begin{tikzpicture}[
+    >=Stealth,
+    every node/.style={font=\small},
+    box/.style={draw, rounded corners=3pt, inner sep=5pt,
+                align=center, minimum width=2.6cm, minimum height=0.65cm},
+    enc/.style={box, fill=blue!10, draw=blue!40},
+    dec/.style={box, fill=teal!10, draw=teal!40},
+    film/.style={box, fill=orange!15, draw=orange!55},
+    rate/.style={box, fill=orange!10, draw=orange!40},
+    sec/.style={font=\small\bfseries},
+  ]
+  %% ---- Region boxes ----
+  \draw[rounded corners=5pt, fill=blue!5, draw=blue!25, dashed]
+    (-2.0,-3.6) rectangle (2.0, 0.3);
+  \draw[rounded corners=5pt, fill=teal!5, draw=teal!25, dashed]
+    (3.0,-3.6) rectangle (7.0, 0.3);
+  \draw[rounded corners=5pt, fill=orange!5, draw=orange!30, dashed]
+    (7.5, 0.6) rectangle (19.0, 2.1);
+  %% ---- Region labels ----
+  \node[sec, blue!65,  rotate=90]  at (-2.45, -1.65) {Encoder};
+  \node[sec, teal!70,  rotate=-90] at (7.45,  -1.65) {Decoder};
+  \node[sec, orange!70] at (13.2, 1.97) {Rate Conditioning};
+  %% ---- Nodes ----
+  \node[box, fill=gray!10] (P)   at (0,    0.85) {Input $\mathbf{P}$\\{\scriptsize 3-ch $xyz$}};
+  \node[enc] (e1) at (0,   -0.8) {E$_1$: ResBlock, 32ch};
+  \node[enc] (e2) at (0,   -2.0) {E$_2$: ResBlock, 64ch};
+  \node[enc] (e3) at (0,   -3.0) {E$_3$: ResBlock, 128ch};
+  \node[dec] (d3) at (5.0, -3.0) {D$_3$: ResBlock, 128ch};
+  \node[dec] (d2) at (5.0, -2.0) {D$_2$: ResBlock, 64ch};
+  \node[dec] (d1) at (5.0, -0.8) {D$_1$: ResBlock, 32ch};
+  \node[film](fh) at (5.0,  1.3)
+    {FiLM Head\\{\scriptsize $\mathbf{h}' = \boldsymbol{\gamma}(r)\odot\mathbf{h}+\boldsymbol{\beta}(r)$}};
+  \node[box, fill=gray!10] (out) at (5.0, 2.55)
+    {$\hat{\mathbf{P}} = \mathbf{P} + \Delta$};
+  \node[rate](gb)  at (9.5,  1.3) {$\boldsymbol{\gamma},\boldsymbol{\beta}\in\mathbb{R}^{32}$};
+  \node[rate](mlp) at (13.2, 1.3) {MLP\ {\scriptsize $1{\to}64{\to}64$}};
+  \node[rate](bpp) at (17.0, 1.3) {$r{=}\log_2(\mathrm{bpp})$};
+  %% ---- Info text (fills white space right of enc/dec, below rate cond) ----
+  \node[anchor=north west, font=\small] at (7.8, 0.1) {%
+    \begin{tabular}{@{}l@{\enspace}l@{}}
+      \textbf{Rate MLP:}    & $[\boldsymbol{\gamma};\boldsymbol{\beta}] =
+                               W_2\,\sigma(W_1 r + b_1) + b_2,\quad \sigma=\mathrm{ReLU}$ \\[4pt]
+      \textbf{Modulation:}  & $\mathbf{h}' = \boldsymbol{\gamma}(r)\odot\mathbf{h}+\boldsymbol{\beta}(r),
+                               \quad \boldsymbol{\gamma},\boldsymbol{\beta}\in\mathbb{R}^{32}$ \\[4pt]
+      \textbf{Output head:} & SparseConv $1^3$;\quad $\Delta = \tanh(\cdot)\times 5$ \\[4pt]
+      \textbf{Result:}      & $\hat{\mathbf{P}} = \mathbf{P} + \Delta$\quad (point count preserved)
+    \end{tabular}%
+  };
+  %% ---- Arrows ----
+  \draw[->] (P)  -- (e1);
+  \draw[->] (e1) -- node[right]{\scriptsize $\times2\!\downarrow$} (e2);
+  \draw[->] (e2) -- node[right]{\scriptsize $\times2\!\downarrow$} (e3);
+  \draw[->] (e3) -- (d3);
+  \draw[->] (d3) -- node[right]{\scriptsize $\div2\!\uparrow$} (d2);
+  \draw[->] (d2) -- node[right]{\scriptsize $\div2\!\uparrow$} (d1);
+  \draw[->] (d1) -- node[right]{\scriptsize 32-ch} (fh);
+  \draw[->] (fh) -- (out);
+  \draw[->, dashed, blue!55, thick]
+    (e1.east) -- node[above]{\scriptsize feat.\ concat} (d1.west);
+  \draw[->, dashed, blue!55, thick]
+    (e2.east) -- node[above]{\scriptsize feat.\ concat} (d2.west);
+  \draw[->] (bpp) -- (mlp);
+  \draw[->] (mlp) -- node[above]{\scriptsize split 32+32} (gb);
+  \draw[->] (gb.west) -- (fh.east);
+  \end{tikzpicture}%
+  }
+  \caption{%
+    Architecture of the rate-conditioned post-processing network.
+    The rate-invariant sparse U-Net backbone (Encoder + Decoder) processes
+    the decoded point cloud.
+    Skip connections (dashed) concatenate encoder features to decoder inputs
+    at matching resolutions.
+    The FiLM head applies per-channel affine modulation conditioned on
+    $r = \log_2(\mathrm{bpp})$; the output head produces bounded displacement vectors
+    $\Delta$ added to the input to yield the refined cloud.
+  }
+  \label{fig:architecture}
+\end{figure}
+
+\subsection{Encoder Path}
+
+The encoder applies three levels of processing:
+\begin{align*}
+  E_1 &: \text{3-ch} \to 32\text{ ch},\quad \text{SubConv}_{3^3} \text{ ResBlock},\quad \text{stride }1 \\
+  E_2 &: 32 \to 64\text{ ch},\quad \text{StrideConv}_{2^3} + \text{ResBlock},\quad \text{stride }2 \\
+  E_3 &: 64 \to 128\text{ ch},\quad \text{StrideConv}_{2^3} + \text{ResBlock},\quad \text{stride }2
+\end{align*}
+
+At each encoder level $\ell$, a ResBlock with two $3^3$ submanifold sparse
+convolutions (Section~\ref{ssec:sparse-conv}) processes the features at
+the current resolution.
+At $E_2$ and $E_3$, a stride-2 sparse convolution precedes the ResBlock,
+halving the spatial resolution and doubling the channel count.
+
+After three levels, the receptive field at the finest resolution is
+$1 + 2 \times (3-1) + 4 \times (3-1) = 13$ voxels per side, providing
+a $13^3 = 2197$ voxel neighbourhood for each active coordinate at the
+bottleneck level.
+This is sufficient to capture local surface geometry (edges, ridges) at the
+scale of fine features in the 8iVFB clouds.
+
+\subsection{Decoder Path and Skip Connections}
+
+The decoder mirrors the encoder with transposed (upsampling) stride-2
+convolutions and skip connections from the encoder:
+\begin{align*}
+  D_3 &: (128 + 128) \to 128\text{ ch},\quad \text{ResBlock},\quad \text{stride }1 \\
+  D_2 &: \text{TrConv}(\times2\uparrow) + (64 + 64) \to 64\text{ ch},\quad \text{ResBlock} \\
+  D_1 &: \text{TrConv}(\times2\uparrow) + (32 + 32) \to 32\text{ ch},\quad \text{ResBlock}
+\end{align*}
+
+At each decoder level, the upsampled features from the level below are
+concatenated with the skip connection from the matching encoder level.
+The concatenated features have twice the channel count of either branch alone,
+and a ResBlock reduces them back to the target channel count.
+
+\paragraph{Why skip connections matter here.}
+The displacement prediction is a per-point, high-resolution task.
+Without skip connections, the only geometric information available to the
+decoder at fine resolution is what propagates up through the bottleneck,
+at 4$\times$ downsampled resolution.
+Skip connections from $E_1$ and $E_2$ provide access to the fine-resolution
+coordinate features at the original spatial scale, which are critical for
+predicting displacement direction and magnitude per voxel.
+
+\subsection{Rate Invariance of the Backbone}
+
+The backbone weights are shared across all compression rates.
+This is a deliberate design choice:
+\begin{itemize}
+  \item The geometric correction task shares common structure across rates:
+    the network must identify surface discontinuities and displace decoded
+    points toward the original surface regardless of the rate.
+  \item Sharing weights provides cross-rate regularisation: the backbone
+    is exposed to the same correction task at different distortion scales,
+    encouraging it to learn a rate-invariant geometric representation.
+  \item Rate-specific adaptation is handled entirely by the FiLM head
+    (Section~\ref{sec:film-head}), which modulates the backbone output at
+    inference time.
+\end{itemize}
+
+% ============================================================

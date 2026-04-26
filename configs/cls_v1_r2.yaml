@@ -1,0 +1,41 @@
+# cls_v1_r2: voxel displacement classification, K=2, r2 only
+# Fix for zero-over-prediction: hard labels (sigma=0) + ordinal weight 0.3
+# Per-axis zero rate: x=82%, y=91%, z=82% (avg 85%) -> cls_p_zero=0.85
+data:
+  data_root: datasets/pcgcv2_decoded
+  rates: [r2]
+  val_sequence: redandblack
+  patch_size: 128
+  stride: 64
+  min_points: 100
+  curvature_k: 30
+  max_clouds: null
+  frame_stride: 12
+  augment: true
+  use_curvature: false
+  overfit: false
+  rate_jitter: 0.0
+
+model:
+  model_type: film_head_v3
+  max_displacement: 2.0
+  film_embed_dim: 64
+  film_rate_repr: bpp
+  quantize_output: false
+
+loss:
+  loss_type: cls_focal
+  focal_gamma: 2.0
+  cls_p_zero: 0.850  # per-axis avg: x=82%, y=91%, z=82%
+  cls_sigma: 0.0     # hard one-hot labels (no gaussian blur)
+
+batch_size: 8
+lr: 5.0e-4
+warmup_epochs: 3
+epochs: 30
+num_workers: -1
+device: cuda
+save_dir: models/postprocessing/cls_v1_r2
+weight_decay: 1.0e-2
+rate_stratified: false
+encoder_lr_scale: 1.0

@@ -1,0 +1,155 @@
+% ============================================================
+%  Chapter 1 -- Introduction
+% ============================================================
+\chapter{Introduction}
+\label{ch:intro}
+
+\section{Motivation}
+
+Three-dimensional geometric data has grown rapidly in the past decade, driven
+by advances in acquisition, storage, and transmission.
+LiDAR sensors on autonomous vehicles stream dense point clouds at tens of
+frames per second.
+Volumetric video capture systems record human bodies as time-varying 3D
+surfaces for immersive telepresence and extended reality applications.
+Cultural heritage institutions digitise artefacts at millimetre precision
+for permanent archival.
+In all of these settings, the point cloud --- an unordered set of 3D
+coordinates, optionally augmented with colour or normal attributes ---
+has become the standard representation: it is directly acquired, imposes no
+topological constraints, and avoids the cubic memory cost of dense voxel grids.
+
+Efficient compression is a prerequisite for any practical use of this data.
+Raw point clouds are large: a single frame of a human body capture at MPEG
+standard resolution contains up to 800,000 points, each requiring three
+floating-point coordinates.
+At video frame rates, uncompressed storage or transmission is prohibitive.
+The MPEG standards body has responded with two families of codecs ---
+G-PCC~\cite{graziosi2020gpcc} for static or sparsely sampled geometry, and
+V-PCC~\cite{schwarz2018emerging} which projects 3D surfaces onto 2D patches
+and applies conventional video compression --- but neither achieves the
+rate-distortion efficiency that learned methods now routinely demonstrate on
+image and video benchmarks.
+
+Learned point cloud codecs, led by architectures such as
+PCGCv2~\cite{wang2021multiscale} and its successors, apply the
+analysis-synthesis paradigm from neural image compression directly to 3D
+occupancy grids.
+An encoder maps the point cloud to a compact latent representation; a learned
+entropy model estimates the latent distribution for arithmetic coding;
+a decoder inverts the process.
+At high bitrates these systems match or exceed G-PCC.
+At low bitrates, however, they reveal a consistent and under-studied failure
+mode: \emph{geometric oversmoothing}.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\textwidth]{soldier_vis.png}
+  \caption{%
+    Geometric oversmoothing in learned point cloud compression (PCGCv2 at r2,
+    0.05~bpp).
+    \textbf{Left}: original \textit{soldier} sequence, frame 803 (79,529 pts).
+    \textbf{Centre}: PCGCv2 decoded (76,058 pts) --- geometric detail at surface
+    boundaries and protrusions is smoothed away by the learned encoder.
+    \textbf{Right}: proposed post-processed output (76,058 pts) --- fine structure
+    substantially recovered.
+    The oversmoothing artifact is invisible to standard D1 PSNR, which averages
+    uniformly over all surface points.
+  }
+  \label{fig:teaser}
+\end{figure}
+
+\section{The Oversmoothing Problem}
+
+Oversmoothing in learned codecs arises from a fundamental property of entropy
+models: rare, fine-grained occupancy patterns incur high coding cost.
+High-curvature regions --- edges, ridges, creases, corners --- produce exactly
+such patterns in the occupancy grid.
+At low bitrates, the encoder is implicitly penalised for representing these
+regions faithfully, and the decoder reconstructs a surface in which such
+features are blurred or erased.
+
+The consequence is spatially non-uniform degradation: flat surfaces are
+reconstructed near-perfectly while geometric detail concentrates the error.
+Standard quality metrics such as point-to-point PSNR (D1)~\cite{tian2017geometric}
+average over the entire reconstructed surface, weighting every point equally
+regardless of its geometric role.
+A codec that faithfully reconstructs 90\% of a surface while systematically
+erasing all edges can still report a high aggregate PSNR --- the metric masks
+precisely the information that matters perceptually.
+
+Figure~\ref{fig:teaser} illustrates this effect: the compressed cloud looks
+reasonable at a glance but has lost all fine surface geometry at boundaries
+and protrusions.
+This thesis begins from the observation that measuring and correcting
+oversmoothing requires evaluating quality \emph{where it hurts}: at
+high-curvature regions of the original surface.
+
+\section{Scope and Contributions}
+
+This work makes the following contributions:
+
+\begin{enumerate}[label=\textbf{\arabic*.}]
+  \item \textbf{Curvature-stratified PSNR metric.}
+    We introduce an evaluation framework that partitions the original point
+    cloud by local surface curvature and computes PSNR separately for edge
+    and flat strata.
+    The metric uses the reverse (original-to-reconstructed) nearest-neighbour
+    direction, which measures how well the reconstruction covers the original
+    surface rather than the converse.
+    Curvature is estimated from the eigenvalue structure of the local
+    covariance matrix; stratification is adaptive via percentile thresholds,
+    making it dataset-independent.
+
+  \item \textbf{Systematic characterisation of oversmoothing.}
+    We apply the metric to PCGCv2 across four sequences of the
+    8i~Voxelized Full Bodies (8iVFB) dataset at seven operating rates.
+    Edge-region PSNR consistently lags flat-region PSNR by 2--4.5~dB, and
+    the gap \emph{widens} with increasing rate --- the codec allocates
+    additional bits toward flat surfaces, not toward recovering detail.
+
+  \item \textbf{Rate-conditioned sparse U-Net post-processor.}
+    We propose a lightweight post-processing network that refines decoded point
+    positions without modifying the codec.
+    The backbone is a three-level sparse U-Net operating directly on the
+    decoded occupancy grid.
+    A Feature-wise Linear Modulation (FiLM)~\cite{perez2018film} head adapts
+    displacement predictions to the compressed bitrate, enabling a single model
+    to serve multiple operating points.
+    Training uses a dynamic Chamfer Distance loss that circumvents the
+    zero-inflation and nearest-neighbour noise problems that defeat
+    displacement-regression losses.
+
+  \item \textbf{Experimental validation and generalisation.}
+    The model achieves $+2.06$~dB edge PSNR at the lowest evaluated rate
+    (r2), $+0.58$~dB at medium rate (r4), and $+0.27$~dB at high rate (r6),
+    averaged across all four 8iVFB sequences and 400 frames.
+    Zero-shot transfer to an unseen codec (Unicorn) and an unseen dataset
+    (MVUB) demonstrates that low-rate oversmoothing is a cross-codec failure
+    mode and that the correction generalises without retraining.
+\end{enumerate}
+
+\section{Thesis Organisation}
+
+The remainder of this thesis is structured as follows.
+
+\textbf{Chapter~\ref{ch:background}} develops the theoretical foundations
+necessary to understand the work: the evolution from 1D signal processing to
+3D geometric processing, the properties of point clouds and their compression,
+the deep learning tools used (sparse convolutions, autoencoders, FiLM
+conditioning), and the quality metrics employed throughout.
+
+\textbf{Chapter~\ref{ch:oversmoothing}} presents the curvature-stratified
+evaluation framework, applies it to PCGCv2 and G-PCC, and quantifies the
+oversmoothing pattern that motivates the post-processing approach.
+
+\textbf{Chapter~\ref{ch:model}} describes the post-processing model in detail:
+problem formulation, backbone architecture, FiLM conditioning, loss function
+design, and training procedure.
+
+\textbf{Chapter~\ref{ch:results}} reports experimental results including ablation
+studies on the loss function, curvature features, and rate weighting strategies,
+full 400-frame evaluation on 8iVFB, and zero-shot generalisation experiments.
+
+\textbf{Chapter~\ref{ch:conclusion}} summarises the findings, discusses
+limitations, and outlines directions for future work.

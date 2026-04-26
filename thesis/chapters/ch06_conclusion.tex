@@ -1,0 +1,244 @@
+% ============================================================
+%  Chapter 6 -- Conclusion
+% ============================================================
+\chapter{Conclusion and Future Work}
+\label{ch:conclusion}
+
+% ============================================================
+\section{Summary}
+
+This thesis addressed the problem of geometric oversmoothing in learned
+point cloud codecs, with a specific focus on PCGCv2 as a representative system.
+
+We began by observing that standard aggregate quality metrics mask the
+spatially non-uniform nature of codec artifacts.
+To expose this, we introduced the \emph{curvature-stratified PSNR metric},
+which partitions the original point cloud by local surface variation and
+computes quality separately for edge (high-curvature) and flat (low-curvature)
+regions.
+Applied to PCGCv2 across the 8iVFB dataset, the metric revealed a consistent
+and growing degradation gap of 2--4.5~dB, widening with rate --- a structural
+bias of the learned codec that standard metrics do not detect.
+
+With this diagnostic, we designed a post-processing network to correct the
+identified distortions without modifying the codec.
+The architecture --- a three-level sparse U-Net with a FiLM-conditioned
+displacement head --- was shaped by three requirements derived from the
+oversmoothing analysis:
+(a) spatial awareness of surface geometry, provided by the U-Net's
+multi-scale receptive field;
+(b) rate adaptation, provided by the FiLM head;
+(c) a training loss that avoids zero-inflation collapse, provided by the
+dynamic Chamfer Distance.
+
+The final model achieves an average edge PSNR improvement of
+$\mathbf{+2.06}$~dB at the lowest evaluated rate,
+$\mathbf{+0.58}$~dB at medium rate, and
+$\mathbf{+0.27}$~dB at high rate,
+across all four 8iVFB sequences and 400 frames.
+These gains are consistent across all four sequences, including three not
+seen during training.
+
+Zero-shot transfer experiments demonstrate that the model extracts
+corrections general enough to improve an unseen codec (Unicorn) at extreme
+compression rates, where oversmoothing is severe enough to be codec-agnostic.
+
+% ============================================================
+\section{Contributions}
+
+To summarise, the concrete contributions of this thesis are:
+
+\begin{enumerate}
+  \item \textbf{Curvature-stratified PSNR.}
+    A diagnostic metric that separates codec evaluation by surface geometry,
+    enabling targeted assessment of edge-region quality.
+    The implementation is released as part of the evaluation pipeline.
+
+  \item \textbf{Oversmoothing characterisation.}
+    A systematic quantitative study showing that PCGCv2's oversmoothing gap
+    grows with rate, is sequence-dependent, and is absent in G-PCC, providing
+    evidence that it is a structural property of the learned encoder.
+
+  \item \textbf{Dynamic Chamfer Distance loss.}
+    A per-patch matching loss that avoids both zero-inflation collapse and
+    nearest-neighbour noise, enabling successful training of a displacement
+    regressor where standard losses fail.
+
+  \item \textbf{FiLM-conditioned multi-rate post-processor.}
+    A single lightweight model that serves multiple rate-distortion operating
+    points, achieving better performance than per-rate models through
+    beneficial multi-rate regularisation.
+
+  \item \textbf{Evidence for cross-codec oversmoothing.}
+    Zero-shot transfer results showing that at extreme compression, geometric
+    oversmoothing is a codec-agnostic failure mode that a learned corrector
+    can address without retraining.
+\end{enumerate}
+
+% ============================================================
+\section{Limitations}
+
+\paragraph{Single-codec training.}
+The model is trained exclusively on PCGCv2-decoded clouds.
+At moderate rates for other codecs (e.g., Unicorn R2--R4), transfer is
+negative.
+A codec-agnostic post-processor would require either multi-codec training
+or a codec identification mechanism.
+
+\paragraph{Displacement-only formulation.}
+The network can only shift existing points, not add or remove them.
+At very low bitrates, the decoded cloud may be missing entire surface regions
+(point dropping), which displacement corrections cannot recover.
+
+\paragraph{Dataset scope.}
+All training and primary evaluation is on the 8iVFB dataset: dense,
+full-body human captures at $G=1024$.
+Performance on sparse outdoor LiDAR scans, mechanical parts, or lower-resolution
+captures is not evaluated.
+
+\paragraph{Computational cost.}
+Post-processing adds an inference step with latency proportional to point
+cloud size.
+For streaming applications, this latency must be bounded; the current
+implementation is not optimised for real-time use.
+
+% ============================================================
+\section{Future Work}
+\label{sec:future-work}
+
+The results open several directions for follow-up.
+We group them roughly by how much new work each would require.
+
+\subsection*{Near-Term Extensions}
+
+\paragraph{Curriculum fine-tuning.}
+The current model trains all rates jointly from the start.
+A curriculum approach --- pre-training the backbone on r2 alone, then
+fine-tuning the FiLM head on r4 and r6 --- may further improve mid-to-high
+rate performance.
+The intuition: the r2 displacement signal is the richest, so the backbone
+develops strong edge-detection features from r2 data.
+Fine-tuning the FiLM head separately for each rate, with the backbone frozen,
+could allow the head to specialise without interference from competing
+rate objectives.
+Preliminary experiments with this curriculum order showed promising
+convergence on validation loss at r4, but the approach was not fully evaluated
+for the final paper.
+
+\paragraph{Inference-time rate adaptation.}
+The current model is conditioned on the actual BPP of each decoded cloud,
+which requires metadata from the codec.
+In deployment settings where the BPP is unknown, the model could estimate it
+from the decoded cloud statistics (e.g., decoded point count divided by the
+number of transmitted bytes, reconstructed from the occupancy pattern).
+A blind BPP estimator would make the post-processor completely black-box,
+requiring only the decoded point cloud.
+
+\paragraph{Faster inference via learned patch routing.}
+The sliding-window patch inference processes all patches uniformly.
+At high bitrates, most patches are already close to the original surface and
+require only near-identity corrections.
+A lightweight ``patch quality'' predictor (e.g., based on local point density
+variance) could route patches to skip inference when the estimated correction
+is below a threshold, reducing inference time at high bitrates by
+$50$--$70\%$ with negligible quality loss.
+
+\subsection*{Medium-Term Research Questions}
+
+\paragraph{Point addition via occupancy prediction.}
+The displacement formulation can only shift existing points, not add new ones.
+At very low bitrates (below r1), PCGCv2 drops entire surface patches, leaving
+regions empty that no displacement can recover.
+Extending the displacement head with an additional occupancy prediction branch
+--- predicting whether new points should be inserted in empty voxels near the
+current surface --- would address this limitation.
+This requires a different loss: the Chamfer Distance extends naturally to
+handle variable-size output sets (the CD itself does not require
+fixed cardinality), but the occupancy branch introduces a combinatorial
+structure that needs careful regularisation to avoid spurious insertions.
+
+\paragraph{Attribute (colour) post-processing.}
+This thesis focuses entirely on geometry.
+Learned codecs also oversmooth colour attributes at high-curvature regions:
+colour boundaries (e.g., the edge between a face and hair) are blurred in
+the decoded cloud by the same occupancy-based encoding mechanism that blurs
+geometry.
+A joint geometry-and-colour post-processor using the geometric features as
+context for colour refinement is a natural extension.
+The shared backbone would extract edge-aware features; separate heads would
+predict geometric displacements and colour residuals.
+The loss would combine geometric Chamfer Distance and colour mean squared
+error, with an optional edge-aware perceptual weight.
+
+\paragraph{Temporal coherence in video sequences.}
+The current post-processor is applied frame-by-frame, independently.
+For volumetric video sequences at 10 fps, adjacent frames share approximately
+90\% of surface geometry (a human subject moves slowly).
+A temporally coherent post-processor could condition on the refined cloud
+from the previous frame, propagating high-quality corrections forward in time
+and reducing temporal flickering artifacts that are perceptually disturbing
+in volumetric video playback.
+The FiLM conditioning is a natural extension point: the temporal offset (frame
+number within the GOP) could be appended to the rate scalar.
+
+\paragraph{Multi-codec training.}
+At intermediate bitrates (Unicorn R2--R4), the current model applied to
+Unicorn-decoded clouds produces negative PSNR changes.
+This is because Unicorn's distortion patterns differ from PCGCv2's at
+non-extreme rates.
+Training on a mixture of PCGCv2- and Unicorn-decoded clouds, with a codec
+embedding (e.g., a one-hot or learned codec ID) as an additional conditioning
+signal, would extend generalisation to intermediate rates for multiple codecs.
+The FiLM head already accepts a vector conditioning input; appending the
+codec embedding to the rate scalar requires minimal architectural changes.
+
+\subsection*{Longer-Term Directions}
+
+\paragraph{Evaluation on LiDAR sequences.}
+All training and evaluation in this thesis uses the 8iVFB dataset: dense,
+full-body human captures at $G = 1024$ with approximately $10^6$ points per
+frame.
+LiDAR point clouds (e.g., SemanticKITTI, nuScenes) have quite different
+geometric properties: sparse, outdoor, with large empty regions
+and a distribution of object types (cars, buildings, pedestrians).
+Whether the curvature-stratified metric and the displacement post-processor
+transfer to this domain is an open question.
+If they do not, a LiDAR-specific training set and possibly a modified
+curvature threshold (LiDAR surfaces have lower curvature density) would be
+needed.
+
+\paragraph{Perceptual quality metric integration.}
+The curvature-stratified PSNR introduced in this thesis is a step toward
+perceptually motivated evaluation.
+A fully perceptual metric would require psychophysical experiments with
+human observers, as standard in image quality assessment (SSIM, LPIPS).
+For volumetric video, where the viewer can rotate the viewpoint, the
+perceptual weighting of surface regions depends on the viewing direction ---
+a direction-dependent metric that accounts for self-occlusion and viewing
+probability would be more predictive of subjective quality.
+Such a metric could then be used as the training objective for a
+perception-driven post-processor.
+
+\paragraph{Comparison with newer codecs and MPEG standardisation.}
+SparsePCGC~\cite{wang2023sparsepcgc} and Unicorn~\cite{wang2025unicorn}
+are the current state of the art.
+Future developments in MPEG Immersive Coding (e.g., Video-based Point Cloud
+Compression v2) may exhibit different oversmoothing profiles.
+Applying the curvature-stratified evaluation framework systematically to all
+these systems would establish whether geometric oversmoothing is a property
+of the occupancy-grid paradigm in general, or specific to PCGCv2's
+coarse-to-fine architecture.
+This would contextualise the PCGCv2 findings within the broader trajectory
+of the field and inform which architectural choices are responsible for the
+edge-region quality gap.
+
+\paragraph{Neural radiance field (NeRF) and 3D Gaussian codecs.}
+Recent neural scene representations (NeRF, 3D Gaussian Splatting) are
+beginning to be used for volumetric video compression.
+These representations do not use explicit point clouds and are not directly
+susceptible to geometric oversmoothing in the same way.
+However, they exhibit their own characteristic artifacts at low bitrates
+(blurriness, floaters, missing thin structures).
+Developing analogous diagnostic metrics for these representations, and
+learned post-processors that correct their specific failure modes, extends
+the methodology developed here to a broader class of codecs.

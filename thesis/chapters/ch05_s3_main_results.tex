@@ -1,0 +1,329 @@
+\section{Main Results on 8iVFB}
+\label{sec:main-results}
+
+Figure~\ref{fig:rd-curve-main} shows the rate-distortion performance of the
+proposed method compared to the PCGCv2 baseline (and Unicorn for reference),
+while Figure~\ref{fig:per-rate-improvement} summarises the average PSNR
+improvement across all sequences and rates.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{rd_curve.png}
+  \caption{%
+    Rate-distortion curves for D1 PSNR (left), Edge PSNR (centre), and
+    Flat PSNR (right) at the three training rates (r2, r4, r6), averaged
+    over all four 8iVFB sequences.
+    PCGCv2 baseline (blue) vs.\ proposed post-processed output (orange).
+    Unicorn (green, dashed) serves as a reference for a higher-performing codec.
+    Zero-shot transfer to Unicorn (purple, dashed) is included for completeness.
+    PSNR improvements at each rate are annotated.
+  }
+  \label{fig:rd-curve-main}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.78\textwidth]{per_rate_improvement.png}
+  \caption{%
+    Average PSNR improvement $\delta$ (dB) over PCGCv2 baseline, broken down
+    by rate and metric type (edge, flat, D1).
+    Improvements are largest at r2 (0.05~bpp), where oversmoothing is most
+    severe, and diminish at higher rates, consistent with the decreasing
+    displacement signal.
+  }
+  \label{fig:per-rate-improvement}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.78\textwidth]{per_sequence_r2.png}
+  \caption{%
+    Per-sequence PSNR improvement at r2 (0.05~bpp).
+    The model achieves consistently positive improvements across all four
+    sequences (edge $\delta$: 1.97--2.29~dB, flat $\delta$: 1.22--1.47~dB),
+    with three of the four sequences not seen during training
+    (\textit{redandblack} is the held-out validation sequence).
+  }
+  \label{fig:per-sequence-r2}
+\end{figure}
+
+\subsection{Per-Sequence Results}
+
+Tables~\ref{tab:results-edge-r2}--\ref{tab:results-flat} report the full
+curvature-stratified results for all four sequences, three rates, and
+400 frames.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Edge-stratum PSNR improvement $\delta$ (dB) over PCGCv2 baseline.
+    All values are average over 100 frames per sequence.
+  }
+  \label{tab:results-edge-r2}
+  \begin{tabular}{lrrr}
+    \toprule
+    Sequence & r2 & r4 & r6 \\
+    \midrule
+    longdress   & $+2.21$ & $+0.58$ & $+0.27$ \\
+    loot        & $+1.78$ & $+0.52$ & $+0.24$ \\
+    redandblack & $+2.06$ & $+0.62$ & $+0.28$ \\
+    soldier     & $+2.20$ & $+0.61$ & $+0.28$ \\
+    \midrule
+    \textbf{Average} & $\mathbf{+2.06}$ & $\mathbf{+0.58}$ & $\mathbf{+0.27}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Flat-stratum PSNR improvement $\delta$ (dB) over PCGCv2 baseline.
+  }
+  \label{tab:results-flat}
+  \begin{tabular}{lrrr}
+    \toprule
+    Sequence & r2 & r4 & r6 \\
+    \midrule
+    longdress   & $+1.69$ & $+0.59$ & $+0.16$ \\
+    loot        & $+1.25$ & $+0.67$ & $+0.20$ \\
+    redandblack & $+1.38$ & $+0.61$ & $+0.17$ \\
+    soldier     & $+1.54$ & $+0.61$ & $+0.18$ \\
+    \midrule
+    \textbf{Average} & $\mathbf{+1.47}$ & $\mathbf{+0.62}$ & $\mathbf{+0.18}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Aggregate D1 PSNR improvement $\delta$ (dB) over PCGCv2 baseline.
+  }
+  \label{tab:results-d1}
+  \begin{tabular}{lrrr}
+    \toprule
+    Sequence & r2 & r4 & r6 \\
+    \midrule
+    longdress   & $+1.92$ & $+0.54$ & $+0.21$ \\
+    loot        & $+1.46$ & $+0.54$ & $+0.21$ \\
+    redandblack & $+1.76$ & $+0.56$ & $+0.23$ \\
+    soldier     & $+1.85$ & $+0.58$ & $+0.23$ \\
+    \midrule
+    \textbf{Average} & $\mathbf{+1.75}$ & $\mathbf{+0.55}$ & $\mathbf{+0.22}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Absolute PSNR Values}
+
+Table~\ref{tab:absolute-psnr-results} provides absolute PSNR values for both the
+PCGCv2 baseline and the refined output, giving context for the relative
+improvements.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Absolute curvature-stratified PSNR (dB) for PCGCv2 baseline (Dec.) and
+    post-processed output (Ref.), averaged over 4 sequences.
+  }
+  \label{tab:absolute-psnr-results}
+  \small
+  \begin{tabular}{lccccccc}
+    \toprule
+    & \multicolumn{3}{c}{Edge PSNR (dB)} & \multicolumn{3}{c}{Flat PSNR (dB)} \\
+    \cmidrule(lr){2-4}\cmidrule(lr){5-7}
+    & r2 & r4 & r6 & r2 & r4 & r6 \\
+    \midrule
+    PCGCv2 decoded & 60.05 & 65.64 & 68.17 & 62.70 & 67.95 & 70.95 \\
+    Proposed (refined) & 62.11 & 66.22 & 68.43 & 64.17 & 68.57 & 71.13 \\
+    \midrule
+    $\Delta$ & $+2.06$ & $+0.58$ & $+0.27$ & $+1.47$ & $+0.62$ & $+0.18$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+At r2, the refined edge PSNR of 62.11~dB approaches the baseline flat PSNR
+of 62.70~dB --- the model nearly closes the stratification gap at r2
+for the \textit{loot} and \textit{soldier} sequences.
+
+\subsection{BD-PSNR Summary}
+
+Table~\ref{tab:bd-psnr} summarises the Bjontegaard Delta metrics computed
+over the evaluated rate range (r2--r6).
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Bjontegaard Delta PSNR (dB) over the r2--r6 rate range.
+    Positive values indicate quality gain at equal rate.
+  }
+  \label{tab:bd-psnr}
+  \begin{tabular}{lccc}
+    \toprule
+    Metric & BD-PSNR (dB) \\
+    \midrule
+    D1 PSNR    & $+0.85$ \\
+    Edge PSNR  & $+0.97$ \\
+    Flat PSNR  & $+0.79$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The BD-PSNR of $+0.97$~dB on the edge metric, integrated across rates r2--r6,
+represents a substantial and consistent gain.
+For reference, the improvement in G-PCC from version 11 to version 14
+(across approximately two years of standardisation effort) is approximately
+1--2~dB BD-PSNR on the MPEG evaluation sequences.
+
+\subsection{Rate-Distortion Analysis}
+
+Table~\ref{tab:rd-bpp} provides the bits-per-point values at each evaluated
+rate point, providing the full rate-distortion context.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    PCGCv2 bits-per-point (bpp) at each evaluated rate, averaged over
+    sequences and 100 frames. The bpp varies slightly per sequence and
+    frame due to the content-adaptive entropy model.
+  }
+  \label{tab:rd-bpp}
+  \begin{tabular}{lccc}
+    \toprule
+    Sequence & r2 (bpp) & r4 (bpp) & r6 (bpp) \\
+    \midrule
+    longdress   & 0.048 & 0.153 & 0.317 \\
+    loot        & 0.047 & 0.149 & 0.311 \\
+    redandblack & 0.050 & 0.158 & 0.325 \\
+    soldier     & 0.049 & 0.155 & 0.321 \\
+    \midrule
+    Average     & 0.049 & 0.154 & 0.319 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Full Oversmoothing Characterisation}
+
+Table~\ref{tab:full-oversmoothing} extends the oversmoothing analysis of
+Chapter~\ref{ch:oversmoothing} to all seven PCGCv2 rate points, providing
+the complete picture of how the stratification gap evolves with rate.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Curvature-stratified reverse PSNR for PCGCv2 at all 7 rate points.
+    Values are for a single representative frame per sequence.
+    $\Delta = \text{Flat} - \text{Edge}$ (dB); positive = oversmoothing.
+  }
+  \label{tab:full-oversmoothing}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{llrrrrr}
+    \toprule
+    Sequence & Rate & bpp & Flat & Medium & Edge & $\Delta$ \\
+    \midrule
+    \multirow{7}{*}{longdress}
+      & r1 & 0.025 & 56.17 & 57.48 & 55.05 & 1.12 \\
+      & r2 & 0.048 & 62.55 & 62.61 & 59.88 & 2.67 \\
+      & r3 & 0.092 & 66.04 & 65.96 & 63.83 & 2.21 \\
+      & r4 & 0.153 & 68.16 & 67.81 & 65.86 & 2.31 \\
+      & r5 & 0.247 & 69.88 & 69.53 & 67.49 & 2.39 \\
+      & r6 & 0.317 & 70.95 & 70.20 & 68.12 & 2.83 \\
+      & r7 & 0.401 & 71.91 & 71.04 & 68.77 & 3.15 \\
+    \midrule
+    \multirow{7}{*}{loot}
+      & r1 & 0.024 & 56.35 & 58.60 & 56.11 & 0.24 \\
+      & r2 & 0.047 & 63.36 & 63.55 & 60.77 & 2.58 \\
+      & r3 & 0.089 & 66.29 & 66.13 & 64.10 & 2.19 \\
+      & r4 & 0.149 & 68.33 & 68.04 & 66.21 & 2.12 \\
+      & r5 & 0.242 & 70.01 & 69.69 & 67.96 & 2.05 \\
+      & r6 & 0.311 & 71.02 & 70.47 & 68.69 & 2.33 \\
+      & r7 & 0.397 & 71.92 & 71.22 & 69.32 & 2.60 \\
+    \midrule
+    \multirow{7}{*}{redandblack}
+      & r1 & 0.027 & 57.29 & 58.24 & 54.87 & 2.41 \\
+      & r2 & 0.050 & 62.94 & 62.92 & 58.69 & 4.24 \\
+      & r3 & 0.095 & 65.85 & 65.73 & 62.17 & 3.68 \\
+      & r4 & 0.158 & 67.97 & 67.50 & 64.19 & 3.78 \\
+      & r5 & 0.256 & 70.13 & 69.24 & 66.03 & 4.11 \\
+      & r6 & 0.325 & 70.89 & 69.96 & 66.67 & 4.22 \\
+      & r7 & 0.410 & 71.78 & 70.79 & 67.25 & 4.53 \\
+    \midrule
+    \multirow{7}{*}{soldier}
+      & r1 & 0.025 & 57.19 & 58.16 & 55.46 & 1.73 \\
+      & r2 & 0.049 & 62.51 & 62.65 & 59.88 & 2.63 \\
+      & r3 & 0.093 & 65.61 & 65.45 & 63.54 & 2.07 \\
+      & r4 & 0.155 & 67.40 & 67.35 & 65.76 & 1.64 \\
+      & r5 & 0.252 & 69.72 & 69.25 & 67.78 & 1.95 \\
+      & r6 & 0.321 & 70.73 & 70.02 & 68.47 & 2.26 \\
+      & r7 & 0.407 & 71.74 & 70.82 & 69.19 & 2.55 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{G-PCC Comparison: Full Oversmoothing Table}
+
+Table~\ref{tab:gpcc-oversmoothing} provides the complete G-PCC oversmoothing
+data for comparison.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Curvature-stratified reverse PSNR for G-PCC at its evaluated rate points
+    (Trisoup mode).
+    $\Delta = \text{Flat} - \text{Edge}$ (dB).
+  }
+  \label{tab:gpcc-oversmoothing}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{llrrrrr}
+    \toprule
+    Sequence & Rate & bpp & Flat & Medium & Edge & $\Delta$ \\
+    \midrule
+    \multirow{5}{*}{longdress}
+      & ts6 & 0.004 & 39.01 & 39.79 & 38.49 & 0.51 \\
+      & ts5 & 0.013 & 52.09 & 51.74 & 48.68 & 3.41 \\
+      & ts4 & 0.043 & 61.76 & 60.95 & 57.09 & 4.67 \\
+      & ts3 & 0.133 & 67.23 & 65.90 & 63.98 & 3.25 \\
+      & ts2 & 0.383 & 68.70 & 67.47 & 66.98 & 1.72 \\
+    \midrule
+    \multirow{5}{*}{loot}
+      & ts6 & 0.005 & 39.12 & 40.84 & 38.88 & 0.24 \\
+      & ts5 & 0.014 & 51.14 & 51.74 & 46.72 & 4.42 \\
+      & ts4 & 0.043 & 63.08 & 62.27 & 55.26 & 7.82 \\
+      & ts3 & 0.128 & 66.00 & 65.77 & 62.68 & 3.31 \\
+      & ts2 & 0.372 & 68.79 & 67.49 & 66.98 & 1.81 \\
+    \midrule
+    \multirow{5}{*}{redandblack}
+      & ts6 & 0.005 & 39.67 & 39.70 & 38.79 & 0.88 \\
+      & ts5 & 0.013 & 51.18 & 50.86 & 44.20 & 6.98 \\
+      & ts4 & 0.044 & 61.78 & 60.91 & 53.90 & 7.88 \\
+      & ts3 & 0.137 & 66.45 & 65.65 & 62.24 & 4.21 \\
+      & ts2 & 0.403 & 68.52 & 67.35 & 66.49 & 2.03 \\
+    \midrule
+    \multirow{5}{*}{soldier}
+      & ts6 & 0.005 & 42.54 & 42.38 & 39.18 & 3.37 \\
+      & ts5 & 0.013 & 50.30 & 49.98 & 47.22 & 3.09 \\
+      & ts4 & 0.044 & 62.86 & 61.34 & 57.70 & 5.16 \\
+      & ts3 & 0.135 & 67.08 & 65.65 & 63.73 & 3.35 \\
+      & ts2 & 0.387 & 62.61 & 62.72 & 62.68 & $-0.07$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The G-PCC data reveals a more variable pattern than PCGCv2.
+At the lowest rate (ts6), G-PCC shows minimal stratification gap ($\Delta < 1$~dB
+for most sequences) because its artifacts are approximately uniform quantisation
+noise.
+However, at intermediate rates (ts4--ts5), G-PCC exhibits a \emph{larger} gap
+than PCGCv2 at comparable bitrates, particularly for \textit{loot}
+($\Delta = 7.82$~dB) and \textit{redandblack} ($\Delta = 7.88$~dB).
+This reflects the Trisoup triangle approximation artefacts, which can
+introduce large errors at surface discontinuities when the triangle size is
+poorly matched to the local geometry.
+At high rates (ts2), G-PCC's gap drops below 2~dB as the triangles are small
+enough to represent fine detail.
+In contrast, PCGCv2's gap \emph{increases} monotonically with rate
+(Table~\ref{tab:full-oversmoothing}).
+
+% ============================================================

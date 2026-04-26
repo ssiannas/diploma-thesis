@@ -1,0 +1,79 @@
+\section{Problem Formulation}
+\label{sec:formulation}
+
+\subsection{Objective}
+
+Let $\hat{\pc} = \{\hat{p}_i\}_{i=1}^{N} \subset \mathbb{Z}^3$ be the
+decoded point cloud at integer voxel coordinates (resolution $G = 1024$)
+produced by PCGCv2 at compression rate $r_{\bpp} \in \R_{>0}$ bits per point,
+and let $\pc^* = \{p^*_j\}_{j=1}^{M} \subset \mathbb{Z}^3$ be the original
+(reference) cloud, available only during training.
+The post-processor is a function:
+\begin{equation}
+  f_\theta : \hat{\pc} \times r \;\longrightarrow\; \hat{\pc}_{\text{refined}},
+  \qquad r = \log_2(r_{\bpp}),
+\end{equation}
+parameterised by $\theta$, that refines the decoded cloud to be geometrically
+closer to the original.
+
+\subsection{Displacement Formulation}
+
+The refinement is formulated as a point-wise displacement:
+\begin{equation}
+  \hat{\pc}_{\text{refined}} = \bigl\{\hat{p}_i + \Delta_i\bigr\}_{i=1}^{N},
+  \qquad \Delta_i = f_\theta(\hat{\pc}, r)_i \in \R^3.
+\end{equation}
+The network predicts a 3D displacement vector $\Delta_i$ for each decoded
+point $\hat{p}_i$.
+The refined output $\hat{\pc}_{\text{refined}}$ has the same number of points
+as the decoded cloud.
+
+\paragraph{Rationale for displacement.}
+The displacement residual between $\hat{\pc}$ and $\pc^*$ is small relative
+to the absolute coordinate magnitudes.
+Predicting the residual is therefore an easier learning problem than predicting
+absolute output coordinates.
+Additionally, the displacement formulation has a natural identity fallback:
+if the network predicts $\Delta_i = \mathbf{0}$ for all $i$, the output
+is exactly the input, which cannot decrease quality relative to the baseline.
+
+\paragraph{Displacement bounds.}
+The predicted displacement is bounded by a $\tanh$ activation scaled to $\pm5$
+voxels:
+\begin{equation}
+  \Delta_i = 5 \cdot \tanh\!\left(\hat{\Delta}_i\right), \qquad \hat{\Delta}_i \in \R^3.
+\end{equation}
+At r2, the mean nearest-neighbour distance is $\approx 0.15$ voxels and the
+90th percentile is $\approx 1.5$ voxels.
+A bound of $\pm5$ voxels covers all realistic corrections with headroom.
+
+\paragraph{Limitations.}
+The displacement formulation cannot \emph{add} points to regions where the
+decoded cloud has none, nor \emph{remove} spurious points.
+At very low bitrates where the decoded cloud is missing entire surface patches,
+displacement alone cannot recover the original geometry.
+This is a structural limitation addressed in the future work
+(Section~\ref{ch:conclusion}).
+
+\subsection{Input Features}
+
+Each active voxel is assigned a 3-channel feature vector:
+\begin{equation}
+  \mathbf{f}(\hat{p}_i) = \left(\frac{\hat{p}_i^x}{G/2} - 1,\;
+    \frac{\hat{p}_i^y}{G/2} - 1,\;
+    \frac{\hat{p}_i^z}{G/2} - 1\right) \in [-1, 1]^3.
+\end{equation}
+The integer voxel coordinates are linearly normalised to $[-1, 1]$ by the
+grid half-resolution $G/2 = 512$.
+
+An ablation study (Section~\ref{ssec:ablation-curvature}) evaluates whether
+augmenting these features with the estimated surface curvature $\kappa(\hat{p}_i)$
+improves performance.
+The finding is that curvature features \emph{hurt} performance, because:
+(a) curvature estimated on the decoded cloud is noisiest at the high-curvature
+boundaries where corrections are most needed; and
+(b) the network's receptive field ($13^3$ voxels at full resolution) already
+captures local surface geometry implicitly from the normalised coordinate
+features.
+
+% ============================================================

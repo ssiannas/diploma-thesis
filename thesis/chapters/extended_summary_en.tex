@@ -1,0 +1,347 @@
+% ============================================================
+%  Extended Summary (English) -- ~4-5 pages
+%  To be translated to Greek and replace abstract_gr.tex
+% ============================================================
+\chapter*{Extended Summary}
+\addcontentsline{toc}{chapter}{Extended Summary}
+
+% ============================================================
+\section*{Introduction and Motivation}
+
+Point clouds have become the dominant representation for three-dimensional
+geometric data across a broad range of applications: autonomous vehicles
+equipped with LiDAR sensors, volumetric video capture systems for immersive
+telepresence, and cultural heritage digitisation at millimetre precision.
+In all of these settings, the sheer volume of raw data makes efficient
+compression a prerequisite for practical use.
+
+Traditional codecs developed by MPEG --- G-PCC for static geometry and V-PCC
+for dynamic surfaces --- partially address this need but do not achieve the
+rate-distortion efficiency that learned methods now routinely demonstrate on
+image and video benchmarks.
+Learned point cloud codecs, with PCGCv2~\cite{wang2021multiscale} as a
+representative system, apply an analysis-synthesis paradigm directly to 3D
+occupancy grids: an encoder maps the point cloud to a compact latent
+representation, a learned entropy model estimates the latent distribution for
+arithmetic coding, and a decoder inverts the process.
+At high bitrates these systems match or exceed G-PCC.
+At low bitrates, however, they reveal a consistent and under-studied failure
+mode: \emph{geometric oversmoothing}.
+
+Oversmoothing arises from a fundamental property of entropy models: rare,
+fine-grained occupancy patterns incur high coding cost.
+High-curvature regions --- edges, ridges, creases, corners --- produce exactly
+such patterns in the occupancy grid.
+At low bitrates, the encoder is implicitly penalised for representing these
+regions faithfully, and the decoder reconstructs a surface in which such
+features are blurred or erased.
+
+The consequence is spatially non-uniform degradation: flat surfaces are
+reconstructed near-perfectly while geometric detail concentrates the error.
+Standard quality metrics such as point-to-point PSNR (D1)~\cite{tian2017geometric}
+average over the entire reconstructed surface, weighting every point equally
+regardless of its geometric role.
+A codec that faithfully reconstructs 90\% of a surface while systematically
+erasing all edges can still report a high aggregate PSNR --- the metric masks
+precisely the information that matters perceptually.
+
+% ============================================================
+\section*{Contributions}
+
+This thesis addresses two interrelated gaps: the \emph{inability to measure}
+oversmoothing with existing metrics, and the \emph{absence of a correction method}
+that operates on decoded point clouds without modifying the underlying codec.
+The two principal contributions are:
+
+\begin{enumerate}
+  \item \textbf{Curvature-stratified PSNR metric.}
+    An evaluation framework that partitions original point cloud points by local
+    surface curvature and computes quality separately for edge and flat strata,
+    exposing degradation that aggregate metrics cannot capture.
+
+  \item \textbf{Rate-conditioned sparse U-Net post-processor.}
+    A lightweight network that corrects geometric distortions in decoded point
+    clouds without modifying the underlying codec, using a Feature-wise Linear
+    Modulation (FiLM) head~\cite{perez2018film} to serve multiple operating
+    rates with a single model.
+\end{enumerate}
+
+% ============================================================
+\section*{Diagnostic Metric: Curvature-Stratified PSNR}
+
+The metric operates in three steps: curvature estimation, stratification, and
+per-stratum quality computation.
+
+\paragraph{Curvature estimation.}
+For each point $p$ in the \emph{original} cloud $\mathcal{P}$, local surface
+curvature $\kappa(p)$ is estimated from the eigenvalue structure of the local
+covariance matrix built from the $k=30$ nearest neighbours.
+The smallest eigenvalue, normalised by the sum of all three, yields the
+\emph{surface variation}: a value near 0 for planar regions and near $1/3$
+for isotropically distributed neighbourhoods.
+
+\paragraph{Stratification.}
+Points are partitioned into flat, medium, and edge terciles using the 33rd
+and 67th percentile curvature thresholds, computed per frame.
+Percentile-based thresholds rather than fixed values make the stratification
+dataset-adaptive: the absolute curvature range that constitutes an ``edge''
+differs across subjects and scene types.
+
+\paragraph{Quality direction.}
+Quality is computed in the \emph{reverse} direction: from the original cloud
+to the reconstructed cloud.
+This measures how well the reconstruction \emph{covers} the original surface,
+rather than whether reconstructed points are close to the original.
+This direction is not merely a design preference but a necessity.
+At low rates, the curvature of the \emph{decoded} cloud correlates negatively
+(Pearson $r \approx -0.33$) with original curvature at edge regions, because
+oversmoothing erases the fine structures that high curvature corresponds to.
+Using decoded-cloud curvature for stratification would classify the
+worst-affected points as flat, inverting the stratification at precisely
+the rates where the metric matters most.
+
+% ============================================================
+\section*{Oversmoothing Characterisation in PCGCv2}
+
+We apply the metric to PCGCv2 across four sequences of the 8i Voxelized Full
+Bodies (8iVFB) dataset~\cite{8ivfb}: \textit{longdress}, \textit{loot},
+\textit{redandblack}, and \textit{soldier}.
+These sequences are the standard MPEG evaluation corpus for point cloud
+compression and span a range of surface complexity.
+
+The results reveal three systematic properties.
+
+\paragraph{Systematic spatial bias.}
+The flat-minus-edge PSNR gap
+$\Delta_{\mathrm{smooth}} = \mathrm{PSNR}_{\mathrm{flat}} - \mathrm{PSNR}_{\mathrm{edge}}$
+is strictly positive across all 28 sequence-rate combinations evaluated (seven
+rate points, four sequences).
+PCGCv2 \emph{always} reconstructs flat regions better than edge regions,
+without exception.
+
+\paragraph{The gap widens with rate.}
+Counterintuitively, the oversmoothing gap \emph{increases} as the bitrate
+increases.
+At the highest evaluated rate (r7), the gap is 2--3$\times$ larger than at
+the lowest (r1) for all sequences, ranging from 2.5 to 4.5~dB.
+This demonstrates that oversmoothing is not simply a low-bitrate artifact
+that disappears with additional bits: the codec allocates extra bits
+preferentially toward flat surfaces, deepening the quality imbalance rather
+than resolving it.
+
+\paragraph{Sequence dependence.}
+The gap magnitude varies substantially: \textit{redandblack} shows the largest
+gap (2.4--4.5~dB), consistent with its fine surface detail (face, hair, fabric),
+while \textit{loot} shows the smallest gap at low rates (0.2~dB at r1).
+
+Applying the same evaluation pipeline to G-PCC reveals a qualitatively different
+artifact profile: the gap peaks at intermediate rates (average 6.4~dB at ts4)
+and then \emph{decreases} at higher rates, forming a non-monotone curve.
+This contrast confirms that the monotonically growing gap is a structural
+property of the learned occupancy-coding paradigm, not of geometry compression
+in general.
+
+\paragraph{Zero-inflation: implications for post-processing design.}
+Examining the distribution of ground-truth displacement magnitudes
+(nearest-neighbour vectors from decoded to original points) reveals that at
+r2, 60\% of decoded points already coincide with original voxels and require
+zero correction.
+At r7, this fraction rises to 89\%.
+This \emph{zero-inflation} property has a critical implication: a naive
+regression model minimises its expected L1 loss by predicting zero for all
+points.
+The model collapses to a trivial solution that ignores the minority of points
+where correction is most needed.
+
+% ============================================================
+\section*{Post-Processing Network}
+
+\subsection*{Problem Formulation}
+
+Let $\hat{\mathcal{P}} = \{\hat{p}_i\}_{i=1}^{N} \subset \mathbb{Z}^3$ be
+the decoded point cloud at integer voxel coordinates (resolution $G=1024$)
+and $\mathcal{P}^* = \{p^*_j\}_{j=1}^{M}$ the original reference cloud.
+The post-processor predicts a 3D displacement $\Delta_i \in \mathbb{R}^3$
+for each decoded point:
+\[
+  \hat{\mathcal{P}}_{\mathrm{refined}}
+    = \bigl\{\hat{p}_i + \Delta_i\bigr\}_{i=1}^{N},
+  \quad
+  \Delta_i = f_\theta(\hat{\mathcal{P}},\,r)_i,
+  \quad r = \log_2(\mathrm{bpp}).
+\]
+The output has the same number of points as the decoded cloud.
+Displacements are bounded to ${\pm}5$ voxels via $\tanh$ activation, covering
+all realistic corrections with headroom.
+Input features are the three normalised voxel coordinates in $[-1,1]^3$;
+an ablation study confirms that adding estimated curvature as an input feature
+\emph{hurts} performance (discussed below).
+
+\subsection*{Architecture: Three-Level Sparse U-Net}
+
+The backbone is a three-level sparse U-Net operating directly on the decoded
+occupancy grid, implemented with MinkowskiEngine~\cite{choy2019minkowski}.
+Each encoder level halves the resolution and doubles the channel count
+(32 $\to$ 64 $\to$ 128); the decoder mirrors this with skip connections.
+The multi-scale structure provides both local geometric detail sensitivity
+(edges) and broader surface context (topology), which a point-independent MLP
+or global operation cannot achieve.
+
+\subsection*{FiLM Rate Conditioning Head}
+
+A two-layer MLP maps the scalar $r = \log_2(\mathrm{bpp})$ to 64-dimensional
+FiLM parameters, split into 32 scale values $\boldsymbol{\gamma}$ and 32 shift
+values $\boldsymbol{\beta}$, which modulate every active voxel's feature vector:
+\[
+  \mathbf{h}'_i = \boldsymbol{\gamma}(r) \odot \mathbf{h}_i + \boldsymbol{\beta}(r).
+\]
+The log-BPP encoding linearises the rate-distortion relationship so that equal
+intervals correspond to approximately equal changes in distortion.
+The FiLM MLP adds only 4,224 parameters (0.17\% of total model size),
+enabling a single 2.5M-parameter model to serve all rate-distortion operating
+points simultaneously.
+
+\subsection*{Loss Function: Dynamic Chamfer Distance}
+
+Standard displacement regression losses (L1, smooth-L1, curvature-weighted L1)
+all fail due to the two structural problems identified above.
+
+\emph{Zero-inflation failure}: at r2, the coordinate-wise median of ground-truth
+targets is zero, so the optimal constant predictor under L1 is zero.
+Any network trained with this loss collapses to near-zero predictions within
+5--10 epochs.
+This was verified empirically for all standard loss variants.
+
+\emph{Nearest-neighbour noise}: at edge regions, a small perturbation of a
+decoded point position can flip its nearest neighbour in the original cloud
+from one side of the edge to the other, causing a discontinuous jump in the
+target.
+This instability is worst precisely where corrections are most needed.
+
+We resolve both problems by abandoning precomputed per-point targets entirely.
+Instead, we directly minimise the symmetric Chamfer Distance between the
+refined patch and the corresponding crop of the original cloud:
+\[
+  \mathcal{L}_{\mathrm{CD}} =
+    \frac{1}{|\hat{\mathcal{P}}_{\mathrm{ref}}|}
+    \sum_{\hat{p} \in \hat{\mathcal{P}}_{\mathrm{ref}}}
+      \min_{p^* \in \mathcal{P}^*_{\mathrm{crop}}} \|\hat{p} - p^*\|^2
+    +
+    \frac{1}{|\mathcal{P}^*_{\mathrm{crop}}|}
+    \sum_{p^* \in \mathcal{P}^*_{\mathrm{crop}}}
+      \min_{\hat{p} \in \hat{\mathcal{P}}_{\mathrm{ref}}} \|p^* - \hat{p}\|^2.
+\]
+The forward term penalises refined points far from the original surface;
+the reverse term penalises surface regions not covered by the refined cloud.
+The nearest-neighbour matching is recomputed at every training step on the
+\emph{current refined positions} --- hence ``dynamic''.
+For already-correct points the gradient contribution is near zero regardless
+of the zero fraction, eliminating zero-inflation bias.
+Nearest-neighbour noise is also resolved because the network can freely move
+points within $[-5,5]^3$ and the matching adapts accordingly.
+
+A critical implementation detail is that the original cloud crop must use
+\emph{zero} boundary padding.
+With non-zero padding, the reverse term is dominated by out-of-boundary
+original points and collapses to near zero, causing a degenerate gradient that
+pushes decoded points toward patch boundaries.
+With zero padding, the two terms are balanced and the model learns correct
+geometric corrections.
+
+% ============================================================
+\section*{Experimental Results}
+
+\subsection*{Main Results on 8iVFB}
+
+The final model is evaluated on 400 frames across all four 8iVFB sequences
+at three rate points (r2, r4, r6).
+Average PSNR improvements over the PCGCv2 baseline are:
+
+\begin{center}
+\begin{tabular}{lcc}
+  \toprule
+  Rate & Edge PSNR $\delta$ (dB) & Flat PSNR $\delta$ (dB) \\
+  \midrule
+  r2 ($\approx$0.05 bpp) & $\mathbf{+2.06}$ & $+1.47$ \\
+  r4 ($\approx$0.15 bpp) & $+0.58$ & $+0.62$ \\
+  r6 ($\approx$0.32 bpp) & $+0.27$ & $+0.18$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+At r2, the refined edge PSNR (62.11~dB) nearly closes the gap to the baseline
+flat PSNR (62.70~dB).
+The Bj{\o}ntegaard Delta PSNR integrated over r2--r6 is \textbf{+0.97~dB}
+on the edge metric --- comparable in magnitude to two years of G-PCC
+standardisation effort (approximately 1--2~dB BD-PSNR per version increment).
+Improvements are consistent across all four sequences, including three not
+seen during training (per-sequence range at r2: 1.78--2.21~dB edge improvement).
+
+\subsection*{Ablation: Curvature as Input Feature}
+
+Removing estimated curvature from the input features \emph{improves} results
+at all rates.
+At r2, edge PSNR improvement increases from +1.62~dB (with curvature) to
++2.06~dB (without), a gain of 0.44~dB.
+Two factors explain this: (a) curvature estimated on the decoded cloud is
+most unreliable at the high-curvature locations where corrections are most
+needed; (b) the network's receptive field ($13^3$ voxels at full resolution)
+already captures local surface geometry implicitly from the normalised
+coordinate features.
+This finding has a methodological implication: providing apparently relevant
+features can hurt learning when those features are noisiest where the signal
+matters most.
+
+% ============================================================
+\section*{Generalisation: Zero-Shot Transfer}
+
+\subsection*{Unseen Codec: Unicorn}
+
+The model is applied without retraining to Unicorn~\cite{wang2025unicorn},
+a state-of-the-art learned codec not seen during training.
+Results reveal a clear bitrate threshold.
+At moderate rates (Unicorn R2--R4, bpp $>$ 0.05), distortion patterns differ
+from PCGCv2's, causing slight edge degradation ($-$0.01 to $-$0.72~dB).
+At extreme rates (R5--R6, bpp $<$ 0.025), oversmoothing is severe enough to
+be codec-agnostic and the corrections transfer: \textbf{+1.09~dB} at R5 and
+\textbf{+1.36~dB} at R6, averaged over all sequences.
+
+\subsection*{Unseen Dataset: MVUB}
+
+Evaluated on the MVUB dataset~\cite{loop2016mvub} (upper-body captures at
+$G=512$, sequences \textit{david} and \textit{ricardo}), the model shows
+positive edge improvement at low rates without retraining:
+\textit{david} +0.92~dB and \textit{ricardo} +1.03~dB at r2.
+At moderate-to-high rates the transfer is neutral to negative, mirroring
+the Unicorn pattern.
+
+Together, these experiments establish that low-rate geometric oversmoothing
+is a cross-codec, cross-dataset failure mode, and that a model trained on a
+single codec can generalise its corrections when the oversmoothing is severe
+enough to dominate the distortion pattern.
+
+% ============================================================
+\section*{Conclusion}
+
+This thesis addresses a specific and under-studied problem in learned point
+cloud compression: geometric oversmoothing concentrated at high-curvature
+surface regions, invisible to standard aggregate metrics.
+
+We introduce a \emph{curvature-stratified PSNR metric} that makes this hidden
+problem visible, and demonstrate that in PCGCv2 the oversmoothing gap is not
+a low-rate artifact but a structural property of the learned occupancy-coding
+paradigm that grows monotonically with rate.
+The contrast with G-PCC --- which shows a non-monotone, rate-decreasing gap ---
+confirms that oversmoothing is intrinsic to the occupancy-grid entropy model.
+
+We propose a \emph{rate-conditioned sparse U-Net post-processor} with a FiLM
+head, trained with a dynamic Chamfer Distance loss that circumvents the two
+structural failure modes of standard displacement regression.
+The model achieves substantial edge PSNR recovery at low rates (+2.06~dB at r2)
+while also improving flat regions, and generalises without retraining to an
+unseen codec and an unseen dataset at extreme compression rates.
+
+\vspace{1em}
+\noindent\textbf{Keywords:}
+point cloud compression, post-processing, oversmoothing, curvature,
+sparse convolutions, FiLM conditioning, rate-distortion, PCGCv2.

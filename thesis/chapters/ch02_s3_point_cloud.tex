@@ -1,0 +1,303 @@
+\section{Point Cloud Geometry}
+\label{sec:3d-representations}
+
+\subsection{Definition and Properties}
+
+A point cloud $\pc = \{p_i\}_{i=1}^{N}$ is an unordered finite set of
+points $p_i = (x_i, y_i, z_i) \in \R^3$, each optionally augmented with
+attribute vectors $a_i \in \R^d$ (colour, surface normal, reflectance).
+This work focuses exclusively on geometry (coordinates); attributes are not
+used.
+
+Three properties of point clouds distinguish them from images and meshes.
+First, the set is \emph{unordered}: any permutation of the points produces
+the same geometric object, so a deep learning model must produce outputs that
+are permutation invariant (for global tasks such as classification) or
+permutation equivariant (for per-point tasks such as segmentation or
+displacement prediction).
+Second, points are \emph{irregular}: they are not at fixed grid positions,
+so standard convolutions, which assume a regular grid, cannot be applied
+directly.
+Third, point clouds are \emph{variable in size}: different frames or objects
+may contain vastly different numbers of points, requiring architectures that
+handle variable input lengths.
+
+\paragraph{Early approaches: PointNet.}
+The first architecture to handle permutation invariance explicitly was
+PointNet~\cite{qi2017pointnet}.
+It processes each point independently through a shared MLP, then aggregates
+all per-point features via a symmetric function (global max pooling):
+\begin{equation}
+  f(\{p_1, \ldots, p_N\}) = g\!\left(\max_{i=1}^N h(p_i)\right),
+\end{equation}
+where $h$ is the shared per-point MLP and $g$ is a further transformation.
+Global max pooling is both permutation invariant and differentiable.
+PointNet++ \cite{qi2017pointnetplusplus} extended this with a hierarchical
+local grouping mechanism, enabling the network to capture local geometric
+context at multiple scales.
+
+\subsection{Comparison with Meshes and Voxel Grids}
+
+Three main 3D representations compete in practice:
+
+\paragraph{Voxel grids.}
+The bounding box is divided into a regular $G^3$ lattice, and each cell
+is labelled occupied or empty.
+Voxel grids support standard 3D convolutions directly and are easy to
+process; their fundamental weakness is cubic scaling with resolution.
+At resolution $G = 1024$ (used by the 8iVFB dataset), a naive binary
+occupancy grid requires $1024^3 / 8 \approx 128$\,MB per frame even before
+feature storage.
+
+\paragraph{Polygonal meshes.}
+A mesh represents a surface as a set of vertices $V \subset \R^3$ connected
+by a set of faces $F$ (typically triangles).
+Meshes are compact for smooth surfaces and support efficient rendering.
+Their weaknesses are: difficult to acquire directly from sensors (requiring
+a reconstruction step); sensitive to mesh connectivity irregularities;
+and hard to process with standard neural architectures.
+Graph convolutional networks~\cite{wang2019dynamic} address the connectivity
+challenge but scale poorly to the hundreds of thousands of faces in
+high-quality captures.
+
+\paragraph{Point clouds.}
+Point clouds are acquired directly by LiDAR and structured-light sensors,
+require no reconstruction step, and represent geometry without connectivity
+assumptions.
+They scale linearly with the number of occupied surface points $N$,
+not cubically with resolution.
+Their principal weakness is the lack of a canonical neighbourhood structure,
+which makes local processing non-trivial.
+
+For the large-scale volumetric captures in this work, point clouds
+\emph{voxelized} to integer grid positions provide the best balance:
+they retain the sparsity advantage of point sets while enabling efficient
+sparse convolutional processing.
+
+\subsection{Voxelization and Sparse Tensors}
+\label{ssec:voxelization}
+
+Voxelization maps point cloud coordinates to integer grid positions at a
+fixed resolution $G$:
+\begin{equation}
+  p_i = (x_i, y_i, z_i) \longmapsto
+    \left\lfloor \frac{p_i - p_{\min}}{p_{\max} - p_{\min}} \cdot G \right\rceil
+    \in \{0, \ldots, G-1\}^3.
+\end{equation}
+Multiple points mapping to the same voxel are merged (typically by taking
+the mean attribute value or simply marking the voxel occupied).
+
+The resulting structure is a \emph{sparse tensor}: a tensor that stores
+values only at a small subset of its index space.
+Formally, a sparse tensor $\mathbf{F}$ is defined by:
+\begin{itemize}
+  \item A coordinate matrix $\mathbf{C} \in \mathbb{Z}^{N \times 3}$ of $N$
+    active (occupied) voxel positions.
+  \item A feature matrix $\mathbf{F} \in \R^{N \times C}$ assigning a
+    $C$-dimensional vector to each active voxel.
+\end{itemize}
+MinkowskiEngine~\cite{choy20194d} implements generalised sparse
+convolutions on this data structure, enabling U-Net architectures to run
+directly on point clouds at $O(N)$ cost (Section~\ref{ssec:sparse-conv}).
+Figure~\ref{fig:voxelization} illustrates the voxelization process and the
+sparsity structure of the resulting tensor.
+
+\begin{figure}[t]
+\centering
+\resizebox{0.90\linewidth}{!}{%
+\begin{tikzpicture}[>=Stealth]
+  \def\gs{0.42}  % voxel cell size
+
+  % ---- Left: continuous point cloud ----
+  \foreach \x/\y in {0.25/2.05, 0.50/2.20, 0.78/2.30, 1.05/2.22,
+                      1.30/2.00, 1.55/1.68, 1.78/1.30, 1.98/0.90,
+                      2.12/0.55, 2.22/0.28} {
+    \fill[blue!55] (\x, \y) circle (2.0pt);
+  }
+  \node[font=\small, below] at (1.2, 0.02) {Point cloud};
+  \draw[->, thick, gray!60] (2.55, 1.15) -- node[above, font=\footnotesize]{voxelise} (3.35, 1.15);
+
+  % ---- Middle: 6x6 voxel grid ----
+  \begin{scope}[xshift=3.6cm]
+    \foreach \i in {0,...,5}
+      \foreach \j in {0,...,5}
+        \draw[gray!28, very thin] ({\i*\gs},{\j*\gs}) rectangle ++({\gs},{\gs});
+    % Occupied voxels corresponding to the arc
+    \foreach \i/\j in {0/4, 1/4, 1/5, 2/5, 3/4, 3/5, 4/3, 5/2} {
+      \fill[blue!32] ({\i*\gs},{\j*\gs}) rectangle ++({\gs},{\gs});
+      \draw[blue!50, thin] ({\i*\gs},{\j*\gs}) rectangle ++({\gs},{\gs});
+    }
+    \node[font=\small, below] at ({3*\gs}, 0.02) {Voxelised};
+    \node[font=\tiny, red!60, below] at ({3*\gs}, -0.28) {8/36 occupied};
+    \draw[->, thick, gray!60]
+      ({6*\gs+0.18}, {3*\gs})
+      -- node[above, font=\footnotesize]{encode}
+      ({6*\gs+0.90}, {3*\gs});
+  \end{scope}
+
+  % ---- Right: sparse tensor (C and F as side-by-side table, no overlap) ----
+  \begin{scope}[xshift=7.50cm]
+    \node[draw, rounded corners=4pt, fill=gray!6,
+          minimum width=3.0cm, inner sep=6pt] at (1.3, 1.30) {%
+      \begin{tabular}{@{}c|c@{}}
+        \multicolumn{2}{@{}c@{}}{\small\textbf{Sparse tensor}}\\[2pt]
+        \scriptsize$\mathbf{C}\;(N{\times}3)$ & \scriptsize$\mathbf{F}\;(N{\times}C)$\\
+        \hline
+        \scriptsize\texttt{(0,4)} & \scriptsize$\mathbf{f}^{(1)}$\\
+        \scriptsize\texttt{(1,4)} & \scriptsize$\mathbf{f}^{(2)}$\\
+        \scriptsize$\vdots$       & \scriptsize$\vdots$
+      \end{tabular}%
+    };
+  \end{scope}
+\end{tikzpicture}%
+}
+\caption{%
+  Voxelization converts a continuous point cloud (left) to an integer-coordinate
+  sparse tensor (centre, right).
+  Each occupied voxel becomes one row in the coordinate matrix $\mathbf{C}$ paired
+  with a feature row in $\mathbf{F}$.
+  Unoccupied voxels are not stored, giving $O(N)$ memory for a surface with
+  $N \ll G^3$ points.
+}
+\label{fig:voxelization}
+\end{figure}
+
+\subsection{Surface Curvature Estimation}
+\label{ssec:curvature-theory}
+
+Surface curvature at a point $p$ quantifies the local deviation of the surface
+from a plane.
+In the discrete point cloud setting, curvature is estimated from the local
+neighbourhood $\mathcal{N}_k(p)$ of the $k$ nearest neighbours.
+
+\paragraph{Covariance analysis.}
+The local covariance matrix is:
+\begin{equation}
+  \mathbf{C}(p) = \frac{1}{k}\sum_{q \in \mathcal{N}_k(p)}
+    (q - \bar{p})(q - \bar{p})^\top \in \R^{3\times3},
+  \qquad \bar{p} = \frac{1}{k}\sum_{q \in \mathcal{N}_k(p)} q.
+\end{equation}
+The eigenvectors of $\mathbf{C}(p)$ approximate the local surface frame:
+the eigenvector corresponding to the smallest eigenvalue $\lambda_0$ aligns
+with the surface normal; the other two span the tangent plane.
+
+\paragraph{Surface variation.}
+The surface variation descriptor~\cite{pauly2002efficient}:
+\begin{equation}
+  \kappa(p) = \frac{\lambda_0}{\lambda_0 + \lambda_1 + \lambda_2} \in [0, 1]
+\end{equation}
+approximates normalised curvature.
+For a perfectly flat region, $\lambda_0 = 0$ and $\kappa = 0$.
+For an isotropic corner with equal variation in all directions,
+$\lambda_0 = \lambda_1 = \lambda_2$ and $\kappa = 1/3$.
+In practice, values above $0.05$ typically correspond to visually detectable
+edges or ridges.
+
+The choice of $k$ controls the spatial scale of the curvature estimate.
+Too small a $k$ yields noisy estimates dominated by scan-point jitter;
+too large a $k$ smooths over fine geometric features.
+We use $k = 30$ throughout, which captures neighbourhood geometry at the
+scale of fine surface features in 8iVFB clouds voxelized at $G = 1024$.
+
+Figure~\ref{fig:curvature-stratification} illustrates the curvature estimation
+and stratification procedure.
+
+\begin{figure}[t]
+\centering
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}[>=Stealth,
+  pstep/.style={draw, rounded corners=4pt, inner sep=8pt, align=center,
+                font=\small, minimum width=2.6cm, minimum height=0.72cm},
+  arr/.style={->, thick, gray!55},
+]
+  % Pipeline steps
+  \node[pstep, fill=blue!8,  draw=blue!30]   (s1) at (0.0, 0)
+    {$k$-NN\\{\scriptsize $k{=}30$ neighbours}};
+  \node[pstep, fill=blue!13, draw=blue!35]   (s2) at (3.6, 0)
+    {Covariance\\{\scriptsize $\mathbf{C}(p_i) \in \mathbb{R}^{3\times 3}$}};
+  \node[pstep, fill=blue!18, draw=blue!40]   (s3) at (7.2, 0)
+    {Eigenvalues\\{\scriptsize $\lambda_0 \leq \lambda_1 \leq \lambda_2$}};
+  \node[pstep, fill=blue!23, draw=blue!50]   (s4) at (10.8, 0)
+    {Surface variation\\{\scriptsize $\kappa = \lambda_0 / \sum_j \lambda_j$}};
+
+  % Input label
+  \node[font=\small, left] at (s1.west) {$\mathcal{P}$\enspace};
+
+  % Stratum outputs
+  \node[pstep, fill=green!12, draw=green!45, minimum width=3.4cm] (flat) at (8.2, -2.8)
+    {Flat stratum\\{\scriptsize $\kappa \leq \kappa_{33}$}};
+  \node[pstep, fill=red!12,   draw=red!45,   minimum width=3.4cm] (edge) at (12.4, -2.8)
+    {Edge stratum\\{\scriptsize $\kappa > \kappa_{67}$}};
+
+  % Flow arrows
+  \draw[arr] (s1) -- node[above, font=\tiny]{k-NN} (s2);
+  \draw[arr] (s2) -- node[above, font=\tiny]{PCA}   (s3);
+  \draw[arr] (s3) -- node[above, font=\tiny]{ratio}  (s4);
+  \draw[arr] (s4.south) -- ++(0,-1.2) -| (flat.north);
+  \draw[arr] (s4.south) -- ++(0,-1.2) -| (edge.north);
+\end{tikzpicture}%
+}
+\caption{%
+  Curvature estimation and stratification pipeline.
+  For each point, the $k$-nearest neighbours are found, a local covariance
+  matrix is computed, and the surface variation $\kappa$ is estimated from
+  the smallest eigenvalue ratio.
+  Points are then partitioned into flat (lower tercile) and edge (upper tercile)
+  strata using percentile thresholds computed on the original point cloud.
+}
+\label{fig:curvature-stratification}
+\end{figure}
+
+\subsection{Applications and Datasets}
+
+Point cloud processing is central to several application domains of societal
+and commercial relevance:
+
+\begin{description}
+  \item[Autonomous driving.]
+    Vehicle-mounted LiDAR sensors (Velodyne HDL-64E, Ouster OS1~\cite{roriz2022lidar}) produce
+    continuous dense outdoor scans at 10--20 fps.
+    These clouds are used for 3D object detection, semantic segmentation,
+    simultaneous localisation and mapping (SLAM), and path planning.
+    The sparsity profile is very different from volumetric video:
+    road scenes are large, sparsely sampled, with many thin structures
+    (poles, pedestrians).
+
+  \item[Volumetric video / immersive telepresence.]
+    Multi-camera capture rigs reconstruct human bodies as dense, coloured
+    point clouds for immersive video communication and extended reality.
+    The \textit{8i Voxelized Full Bodies (8iVFB)} dataset~\cite{8ivfb} used in
+    this work consists of four sequences (\textit{longdress}, \textit{loot},
+    \textit{redandblack}, \textit{soldier}) acquired at 10 fps, containing
+    300 frames per sequence at resolution $G = 1024$ with up to 800\,000
+    points per frame.
+
+  \item[Cultural heritage and digital preservation.]
+    Structured-light scanners and photogrammetric pipelines preserve artefacts
+    at sub-millimetre precision.
+    Notable examples include scans of the Notre-Dame de Paris cathedral
+    (used for reconstruction after the 2019 fire) and museum artefact
+    digitisation programmes.
+
+  \item[Medical imaging.]
+    CT and MRI volumetric reconstructions can be converted to surface point
+    clouds for surgical planning, prosthesis fitting, and anatomical
+    analysis.
+
+  \item[Robotics and industrial inspection.]
+    Structured-light depth cameras (Intel RealSense, Microsoft Azure Kinect)
+    produce dense point clouds for grasping, navigation, and quality control
+    in manufacturing.
+\end{description}
+
+\subsection{The Microsoft Voxelized Upper Bodies (MVUB) Dataset}
+
+The MVUB dataset~\cite{loop2016mvub} provides point clouds of human
+upper bodies at resolution $G = 512$, acquired at 30 fps.
+The subjects \textit{david10} and \textit{ricardo10} provide 10 frames each.
+MVUB's lower resolution and different acquisition setup make it a useful
+out-of-distribution test for generalisation experiments
+(Section~\ref{ssec:mvub}).
+
+
+% ============================================================

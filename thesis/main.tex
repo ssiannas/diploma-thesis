@@ -1,0 +1,151 @@
+% ============================================================
+%  Diploma Thesis -- University of Patras, ECE Department
+%  Rate-Conditioned Post-Processing for Learned Point Cloud Compression
+%  Author : Spyridon Siannas
+%  Supervisor : Konstantinos Moustakas
+% ============================================================
+\documentclass[12pt,a4paper,twoside]{report}
+
+% --- Language & font (XeLaTeX) ----
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setmainlanguage{english}
+\setotherlanguage{greek}
+% English: Times New Roman; Greek: GFS Didot (matches UPatras reference style)
+\setmainfont{Times New Roman}
+\newfontfamily\greekfont{GFSDidot}[
+  Path=/home/ssiannas/.TinyTeX/texmf-dist/fonts/opentype/public/gfsdidot/,
+  Extension=.otf,
+  BoldFont=GFSDidotBold,
+  ItalicFont=GFSDidotItalic,
+  BoldItalicFont=GFSDidotBoldItalic
+]
+
+% --- Layout -------------------------------------------------
+\usepackage[
+  top=3cm, bottom=3cm,
+  inner=3.5cm, outer=2.5cm,   % inner wider for binding
+]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+\setlength{\parindent}{1.5em}
+\setlength{\parskip}{0.3em}
+\raggedbottom               % prevents large gaps; pages fill to natural height
+\widowpenalty=10000         % no single last line of paragraph at top of page
+\clubpenalty=10000          % no single first line of paragraph at bottom of page
+
+% --- Math ---------------------------------------------------
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{bm}
+\usepackage{mathtools}
+
+% --- Graphics & figures -------------------------------------
+\usepackage{graphicx}
+\graphicspath{{figures/}}
+\usepackage[caption=false,font=normalsize]{subfig}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,shapes,positioning}
+
+% --- Tables -------------------------------------------------
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+
+% --- Bibliography -------------------------------------------
+\usepackage[sort&compress,numbers]{natbib}
+\bibliographystyle{IEEEtranN}
+
+% --- Hyperlinks (load last) ---------------------------------
+\usepackage[
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=blue!70!black,
+  urlcolor=blue!70!black,
+  pdftitle={Rate-Conditioned Post-Processing for Learned Point Cloud Compression},
+  pdfauthor={Spyridon Siannas},
+]{hyperref}
+
+% --- Headers ------------------------------------------------
+\usepackage{fancyhdr}
+\setlength{\headheight}{15pt}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE]{\small\leftmark}
+\fancyhead[RO]{\small\rightmark}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% --- Chapter style ------------------------------------------
+\usepackage{titlesec}
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries}{\chaptertitlename\ \thechapter}{18pt}{\Huge}
+\titlespacing*{\chapter}{0pt}{30pt}{20pt}
+
+% --- Misc ---------------------------------------------------
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage[ruled,vlined]{algorithm2e}
+\usepackage{listings}
+\usepackage{csquotes}
+\usepackage{caption}
+\captionsetup{font=small,labelfont=bf}
+
+% --- Macros -------------------------------------------------
+% XeLaTeX logo (graphicx already loaded for \reflectbox)
+\newcommand{\XeLaTeX}{X\kern-.13em\lower.5ex\hbox{\reflectbox{E}}\kern-.12em\LaTeX}
+\newcommand{\pc}{\mathcal{P}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\CD}{\mathrm{CD}}
+\newcommand{\PSNR}{\mathrm{PSNR}}
+\newcommand{\bpp}{\mathrm{bpp}}
+\newcommand{\diag}{\mathrm{diag}}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+
+% ============================================================
+\begin{document}
+
+\pagenumbering{roman}
+\setcounter{page}{1}
+
+% --- Title page (UPatras style) -----------------------------
+\input{chapters/frontmatter}
+
+% --- Abstracts ----------------------------------------------
+\input{chapters/abstract_gr}
+\input{chapters/abstract_en}
+
+% --- Acknowledgements ---------------------------------------
+\input{chapters/acknowledgements}
+
+% --- TOC, LOF, LOT ------------------------------------------
+\tableofcontents
+\addcontentsline{toc}{chapter}{\listfigurename}
+\listoffigures
+\addcontentsline{toc}{chapter}{\listtablename}
+\listoftables
+
+\cleardoublepage
+\pagenumbering{arabic}
+\setcounter{page}{1}
+
+% --- Chapters -----------------------------------------------
+\input{chapters/ch01_intro}
+\input{chapters/ch02_background}
+\input{chapters/ch_related}
+\input{chapters/ch03_oversmoothing}
+\input{chapters/ch04_model}
+\input{chapters/ch05_results}
+\input{chapters/ch06_conclusion}
+
+% --- Bibliography -------------------------------------------
+\cleardoublepage
+\addcontentsline{toc}{chapter}{Bibliography}
+\bibliography{references,thesis_refs}
+
+% --- Appendices ---------------------------------------------
+\appendix
+\input{chapters/appendix_a}
+
+\end{document}

@@ -1,0 +1,137 @@
+\section{Ablation Studies}
+\label{sec:ablation}
+
+\subsection{Loss Function}
+\label{ssec:ablation-loss}
+
+Table~\ref{tab:ablation-loss} compares the dynamic Chamfer Distance loss
+against displacement-based alternatives evaluated on the held-out validation
+sequence (\textit{redandblack}, r2, 25 validation frames sampled during
+training).
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Loss function ablation on \textit{redandblack} r2.
+    Negative $\delta$ means degradation; ``collapse'' means the model
+    predicted near-zero displacement for all points.
+  }
+  \label{tab:ablation-loss}
+  \begin{tabular}{lcc}
+    \toprule
+    Loss function & Edge $\delta$ (dB) & Flat $\delta$ (dB) \\
+    \midrule
+    L1 displacement          & $-0.12$ & $+0.01$ (collapse) \\
+    Smooth-L1 displacement   & $-0.08$ & $+0.03$ (collapse) \\
+    Curvature-weighted L1    & $-0.15$ & $+0.02$ (collapse) \\
+    Min-of-$k$=5 targets     & $+0.11$ & $+0.08$ \\
+    Gated zero-shrinkage     & $+0.34$ & $+0.19$ \\
+    Chamfer Distance (this work) & $\mathbf{+1.87}$ & $\mathbf{+1.10}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+All displacement-based losses produce near-zero or negative results,
+consistent with the zero-inflation failure mode described in Section~\ref{sec:loss}.
+The min-of-$k$ and gated zero-shrinkage approaches (Section~\ref{sec:failed-approaches})
+partially address the problem but fall far short of Chamfer Distance.
+
+\subsection{Input Features}
+\label{ssec:ablation-curvature}
+
+Table~\ref{tab:ablation-curvature} compares models trained with and without
+explicit curvature features appended to the input coordinates.
+The ``curv'' variant computes surface variation on the decoded cloud and
+appends it as a 4th input channel.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Input feature ablation. Results on 8iVFB, 4 sequences, 400 frames.
+    Mean $\delta$ (dB) averaged over all sequences.
+  }
+  \label{tab:ablation-curvature}
+  \begin{tabular}{lccccc}
+    \toprule
+    & \multicolumn{2}{c}{r2} & \multicolumn{2}{c}{r4} & r6 \\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-6}
+    Features & Edge $\delta$ & Flat $\delta$ & Edge $\delta$ & Flat $\delta$ & Edge $\delta$ \\
+    \midrule
+    xyz + curvature (v10)      & $+1.62$ & $+1.15$ & $+0.46$ & $+0.64$ & $+0.17$ \\
+    xyz only (v10-nocurv)      & $\mathbf{+2.06}$ & $\mathbf{+1.47}$ & $\mathbf{+0.58}$ & $\mathbf{+0.62}$ & $\mathbf{+0.27}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Removing curvature improves all metrics.
+The gain from removing curvature is largest at r2 ($+0.44$~dB edge), the rate
+with the strongest oversmoothing.
+As explained in Section~\ref{sec:formulation}, decoded-cloud curvature is
+most unreliable precisely where corrections are most needed, injecting noise
+into the backbone's input at the critical locations.
+
+\subsection{Rate Conditioning Architecture}
+\label{ssec:ablation-film}
+
+Table~\ref{tab:ablation-film} compares FiLM conditioning to alternative
+rate injection strategies.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Rate conditioning ablation. Results at r2 and r6, averaged over 4 sequences.
+  }
+  \label{tab:ablation-film}
+  \begin{tabular}{lcccc}
+    \toprule
+    & \multicolumn{2}{c}{r2 Edge $\delta$} & \multicolumn{2}{c}{r6 Edge $\delta$} \\
+    Conditioning & dB & & dB & \\
+    \midrule
+    No conditioning (single-rate r2) & $+1.45$ & & -- &\\
+    Input concatenation (rate as feature) & $+1.71$ & & $+0.12$ & \\
+    FiLM on all backbone blocks & diverged & & -- &\\
+    FiLM on head only (this work) & $\mathbf{+2.06}$ & & $\mathbf{+0.27}$ & \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+FiLM on the head only is the best-performing approach.
+Applying FiLM to all backbone blocks allows the rate signal to interfere with
+the shared backbone features, causing gradient conflicts between rates during
+multi-rate training and eventually diverging.
+Confining rate-dependent computation to the head prevents this interference
+while providing sufficient rate adaptation.
+
+\subsection{Rate Weighting Strategy}
+\label{ssec:ablation-weighting}
+
+Table~\ref{tab:ablation-weights} compares the three rate-weighting strategies
+described in Section~\ref{sec:multi-rate}.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Rate weighting ablation.
+    Average edge $\delta$ (dB) over 4 sequences, 400 frames.
+    BD-PSNR computed over r2/r4/r6 for edge stratum.
+  }
+  \label{tab:ablation-weights}
+  \begin{tabular}{lcccc}
+    \toprule
+    Weighting strategy & r2 & r4 & r6 & BD-PSNR \\
+    \midrule
+    Kendall uncertainty & $+0.71$ & $+0.12$ & $+0.04$ & $+0.29$ \\
+    Dynamic detached    & $+1.28$ & $+0.38$ & $+0.21$ & $+0.62$ \\
+    Static $[1.0, 0.3, 0.05]$ (this work) & $\mathbf{+2.06}$ & $\mathbf{+0.58}$ & $+0.27$ & $\mathbf{+0.97}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Static weighting outperforms both alternatives, showing that assigning most
+gradient budget to r2 is the right inductive bias.
+The Kendall weighting failure is particularly informative: within 5 epochs,
+the learned task weights converge to the inverted order
+$[w_2, w_4, w_6] \approx [0.12, 0.31, 0.57]$, downweighting r2 because its
+high loss magnitude is misinterpreted as high epistemic uncertainty.
+
+% ============================================================

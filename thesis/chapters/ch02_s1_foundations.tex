@@ -1,0 +1,191 @@
+\section{Foundations of Deep Learning}
+\label{sec:deep-learning-foundations}
+
+\subsection{Artificial Neural Networks}
+
+An artificial neural network (ANN) is a parameterised function
+$f_\theta : \mathcal{X} \to \mathcal{Y}$ composed of layers of simple
+computational units called neurons.
+A single neuron with $d$-dimensional input $\mathbf{x} \in \R^d$ computes:
+\begin{equation}
+  z = \sigma\!\left(\mathbf{w}^\top \mathbf{x} + b\right), \quad
+  \mathbf{w} \in \R^d,\ b \in \R,
+\end{equation}
+where $\mathbf{w}$ is a weight vector, $b$ a bias scalar, and $\sigma$ a
+non-linear \emph{activation function}.
+The activation function is what prevents the network from collapsing to a
+single linear transformation regardless of depth; popular choices are the
+Rectified Linear Unit (ReLU, $\sigma(z) = \max(0, z)$), sigmoid
+($\sigma(z) = 1/(1+e^{-z})$), and hyperbolic tangent
+($\sigma(z) = \tanh(z) \in (-1, 1)$).
+
+Arranging neurons into $L$ sequential \emph{layers} gives a multi-layer
+perceptron (MLP):
+\begin{equation}
+  \mathbf{h}^{(0)} = \mathbf{x}, \qquad
+  \mathbf{h}^{(\ell)} = \sigma\!\left(\mathbf{W}^{(\ell)} \mathbf{h}^{(\ell-1)}
+    + \mathbf{b}^{(\ell)}\right), \qquad \ell = 1, \ldots, L,
+\end{equation}
+where $\mathbf{W}^{(\ell)} \in \R^{d_\ell \times d_{\ell-1}}$ and
+$\mathbf{b}^{(\ell)} \in \R^{d_\ell}$.
+The final layer produces the network output $f_\theta(\mathbf{x}) = \mathbf{h}^{(L)}$.
+The universal approximation theorem~\cite{cybenko1989approximation,hornik1989multilayer} guarantees
+that a sufficiently wide single-hidden-layer MLP can approximate any continuous
+function on a compact domain, but depth --- not just width --- is the key
+practical enabler of modern networks.
+Figure~\ref{fig:mlp} illustrates a three-layer MLP with the information flow
+from input to output.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  >=Stealth,
+  neuron/.style={circle, draw, minimum size=0.50cm, inner sep=0pt, line width=0.6pt},
+]
+  \def\layersep{2.0cm}
+  \def\vsep{0.62cm}
+  % Input (4): y = (1.5-i)*vsep for i=0..3  => 0.93, 0.31, -0.31, -0.93
+  \foreach \i in {0,...,3}
+    \node[neuron, fill=blue!18, draw=blue!50]       (I\i) at (0,           {(1.5-\i)*\vsep}) {};
+  % Hidden (5): y = (2-i)*vsep for i=0..4  => 1.24, 0.62, 0, -0.62, -1.24
+  \foreach \i in {0,...,4}
+    \node[neuron, fill=green!18, draw=green!55]     (H\i) at (\layersep,   {(2-\i)*\vsep})   {};
+  % Output (3): y = (1-i)*vsep for i=0..2  => 0.62, 0, -0.62
+  \foreach \i in {0,...,2}
+    \node[neuron, fill=red!15,  draw=red!45]        (O\i) at (2*\layersep, {(1-\i)*\vsep})   {};
+  % Connections
+  \foreach \i in {0,...,3}
+    \foreach \j in {0,...,4}
+      \draw[gray!45, very thin] (I\i) -- (H\j);
+  \foreach \i in {0,...,4}
+    \foreach \j in {0,...,2}
+      \draw[gray!45, very thin] (H\i) -- (O\j);
+  % Layer labels — placed well above the top neuron of each column
+  % Input top at y = 0.93+0.25 = 1.18; label at 1.50
+  \node[font=\small\bfseries, blue!65]        at (0,           1.52) {Input};
+  % Hidden top at y = 1.24+0.25 = 1.49; label at 1.85
+  \node[font=\small\bfseries, green!60!black] at (\layersep,   1.87) {Hidden};
+  % Output top at y = 0.62+0.25 = 0.87; label aligned with Input
+  \node[font=\small\bfseries, red!65]         at (2*\layersep, 1.52) {Output};
+  % Activation formula below hidden column
+  % Hidden bottom at y = -1.24-0.25 = -1.49
+  \node[font=\footnotesize] at (\layersep, -1.78)
+    {$\mathbf{h}^{(\ell)} = \sigma\!\left(\mathbf{W}^{(\ell)}\mathbf{h}^{(\ell-1)}+\mathbf{b}^{(\ell)}\right)$};
+\end{tikzpicture}
+\caption{%
+  A multi-layer perceptron (MLP) with one hidden layer.
+  Every neuron in each layer connects to every neuron in the next
+  (fully-connected); a non-linear activation $\sigma$ is applied
+  element-wise after each linear transformation.
+}
+\label{fig:mlp}
+\end{figure}
+
+\subsection{Training via Backpropagation and Gradient Descent}
+
+Training a neural network amounts to finding parameters $\theta^*$ that minimise
+an empirical loss $\mathcal{L}(\theta)$ over a dataset
+$\{(\mathbf{x}_i, \mathbf{y}_i)\}_{i=1}^N$:
+\begin{equation}
+  \theta^* = \arg\min_\theta \frac{1}{N}\sum_{i=1}^N
+    \ell\!\left(f_\theta(\mathbf{x}_i),\, \mathbf{y}_i\right),
+\end{equation}
+where $\ell$ is a per-sample loss (e.g., mean squared error for regression,
+cross-entropy for classification).
+
+Gradient descent updates parameters in the direction of steepest loss decrease:
+\begin{equation}
+  \theta \leftarrow \theta - \eta \,\nabla_\theta \mathcal{L}(\theta),
+\end{equation}
+where $\eta > 0$ is the learning rate.
+In practice, stochastic gradient descent (SGD) approximates the full gradient
+using a random mini-batch $\mathcal{B} \subset \{1,\ldots,N\}$ at each step,
+dramatically reducing per-step computation while retaining convergence
+guarantees under mild conditions.
+
+The critical insight that makes training deep networks feasible is
+\emph{backpropagation}~\cite{lecun1989backpropagation}: an efficient
+application of the chain rule that computes the gradient of the loss with
+respect to all parameters in a single backward pass, at computational cost
+proportional to the forward pass.
+For a scalar loss $\mathcal{L}$ and a composed function $f = f_L \circ \cdots \circ f_1$,
+the gradient with respect to the parameters of layer $\ell$ is:
+\begin{equation}
+  \frac{\partial \mathcal{L}}{\partial \mathbf{W}^{(\ell)}} =
+    \frac{\partial \mathcal{L}}{\partial \mathbf{h}^{(L)}}
+    \cdot \frac{\partial \mathbf{h}^{(L)}}{\partial \mathbf{h}^{(L-1)}}
+    \cdots \frac{\partial \mathbf{h}^{(\ell+1)}}{\partial \mathbf{h}^{(\ell)}}
+    \cdot \frac{\partial \mathbf{h}^{(\ell)}}{\partial \mathbf{W}^{(\ell)}}.
+\end{equation}
+Modern deep learning frameworks (PyTorch, TensorFlow) implement automatic
+differentiation to compute these gradients without user intervention.
+
+\subsection{Adaptive Optimisers}
+
+Plain SGD applies a uniform learning rate to all parameters.
+Adam~\cite{kingma2015adam} improves on this by maintaining
+per-parameter first and second moment estimates of the gradients:
+\begin{align}
+  \mathbf{m}_t &= \beta_1 \mathbf{m}_{t-1} + (1-\beta_1)\mathbf{g}_t, \\
+  \mathbf{v}_t &= \beta_2 \mathbf{v}_{t-1} + (1-\beta_2)\mathbf{g}_t^2, \\
+  \hat{\mathbf{m}}_t &= \mathbf{m}_t / (1 - \beta_1^t), \quad
+  \hat{\mathbf{v}}_t = \mathbf{v}_t / (1 - \beta_2^t), \\
+  \theta_t &= \theta_{t-1} - \eta\, \hat{\mathbf{m}}_t / (\sqrt{\hat{\mathbf{v}}_t} + \epsilon).
+\end{align}
+AdamW~\cite{loshchilov2017decoupled} decouples weight decay from the gradient
+update by adding a direct $\ell_2$ penalty on weights:
+\begin{equation}
+  \theta_t = (1 - \eta\lambda)\theta_{t-1}
+    - \eta\, \hat{\mathbf{m}}_t / (\sqrt{\hat{\mathbf{v}}_t} + \epsilon),
+\end{equation}
+where $\lambda$ is the weight decay coefficient.
+Decoupling weight decay from the adaptive gradient scaling corrects a
+regularisation inconsistency in the original Adam update and generally
+improves generalisation.
+
+\subsection{Regularisation, Overfitting, and Learning Rate Schedules}
+
+A model with enough capacity will memorise the training set
+(\emph{overfitting}): training loss decreases but the function fails to
+generalise.
+The most direct remedy is to constrain the effective function class.
+\emph{Weight decay} ($\ell_2$ regularisation) adds $\lambda\|\theta\|_2^2$
+to the loss, penalising large weights and biasing the optimiser toward smoother
+solutions.
+\emph{Dropout}~\cite{srivastava2014dropout} randomly zeroes a fraction $p$
+of activations during training, preventing units from co-adapting and
+effectively training an ensemble of sub-networks.
+
+For spatial tasks, \emph{data augmentation} is often the most
+cost-effective regulariser.
+Label-preserving transforms --- rotations, flips, scale jitter --- expand
+the effective training distribution without new labels.
+In this work all 48 discrete symmetries of the 3D
+cube~\cite{winkels2018gcnn,cohen2016equivariant} are applied uniformly to
+point cloud patches, exploiting the fact that codec distortions are
+invariant to the orientation and reflection of the patch.
+\emph{Batch normalisation}~\cite{ioffe2015batch} standardises intermediate
+activations within each mini-batch; beyond reducing internal covariate shift,
+it stabilises training and has a regularising effect that reduces sensitivity
+to the learning rate.
+Training is terminated by \emph{early stopping} when held-out validation
+loss stops improving.
+
+A fixed learning rate is rarely optimal.
+A high rate accelerates early training but prevents convergence to a sharp
+minimum; a low rate is too slow from a random initialisation.
+In this work the two are combined: the rate is increased linearly from
+$10^{-5}$ to the peak $10^{-3}$ over the first few epochs (\emph{linear
+warm-up}), preventing large gradient steps from destabilising batch statistics
+before they have stabilised, then follows a cosine
+schedule~\cite{loshchilov2017sgdr}:
+\begin{equation}
+  \eta_t = \eta_{\min} + \tfrac{1}{2}(\eta_{\max} - \eta_{\min})
+           \bigl(1 + \cos(\pi t / T)\bigr),
+\end{equation}
+gradually decreasing to $\eta_{\min}$ over $T$ epochs.
+The smooth decay allows fine-grained convergence in the later epochs without
+premature stalling.
+
+
+% ============================================================

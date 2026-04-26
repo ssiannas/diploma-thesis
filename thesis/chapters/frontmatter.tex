@@ -1,0 +1,409 @@
+% ============================================================
+%  Front Matter -- UPatras ECE Diploma Thesis
+%  Structure:
+%    EN title page  ->  EN plagiarism  ->  EN certification
+%    GR title page  ->  GR plagiarism  ->  GR certification
+%    Thesis details ->  Inner (fancy) title page
+% ============================================================
+
+% ============================================================
+% PAGE 1: English Title / Cover
+% ============================================================
+\begin{titlepage}
+\thispagestyle{empty}
+\centering
+
+{\large\bfseries
+  UNIVERSITY OF PATRAS\,--\,POLYTECHNIC FACULTY\\[0.25em]
+  DEPARTMENT OF ELECTRICAL\\
+  AND COMPUTER ENGINEERING%
+}
+
+\vspace{1.4em}
+
+\includegraphics[width=0.72\textwidth]{upatras_logo}
+
+\vspace{1.2em}
+
+{\small
+  \textbf{Sector:} TELECOMMUNICATIONS AND INFORMATION TECHNOLOGY\\[0.2em]
+  \textbf{Laboratory:} WIRE COMMUNICATIONS LABORATORY%
+}
+
+\vspace{1.0em}
+
+{\large\underline{DIPLOMA THESIS}}
+
+\vspace{0.6em}
+
+{\normalsize
+  of the student of the Department of Electrical and Computer Engineering,\\
+  Polytechnic Faculty, University of Patras%
+}
+
+\vspace{0.8em}
+
+{\Large\bfseries SPYRIDON SIANNAS}\\[0.25em]
+{\small Registration Number: 1053718}
+
+\vspace{1.0em}
+
+{\normalsize\underline{Subject}}
+
+\vspace{0.4em}
+
+{\large\bfseries
+  Rate-Conditioned Post-Processing\\[0.2em]
+  for Learned Point Cloud Compression%
+}
+
+\vspace{1.0em}
+
+{\normalsize\underline{Supervisor}}
+
+\vspace{0.4em}
+
+{\normalsize Professor Moustakas Konstantinos}
+
+\vspace{0.5em}
+
+\vfill
+
+{\normalsize Patras, March 2026}
+
+\end{titlepage}
+
+% ============================================================
+% PAGE 3: English Plagiarism Declaration
+% ============================================================
+\cleardoublepage
+\thispagestyle{empty}
+\vspace*{3cm}
+
+\begin{center}
+  {\normalsize University of Patras, Department of Electrical and Computer Engineering}\\[0.5em]
+  {\large\bfseries Spyridon Siannas}\\[0.5em]
+  {\normalsize \textcopyright\ 2026\,--\,All rights reserved}
+\end{center}
+
+\vspace{2em}
+
+\noindent The whole work is an original work, produced by Spyridon Siannas, and does not
+violate the rights of third parties in any way.
+If the work contains material which has not been produced by him, this is clearly visible
+and is explicitly mentioned in the text of the work as a product of a third party, noting
+in a similarly clear way his identification data, while at the same time confirming that
+in case of using original graphics representations, images, graphs, etc., he has obtained
+the unrestricted permission of the copyright holder for the inclusion and subsequent
+publication of this material.
+
+% ============================================================
+% PAGE 5: English Certification
+% ============================================================
+\cleardoublepage
+\thispagestyle{empty}
+\vspace*{1.5cm}
+
+\begin{center}
+  {\large\bfseries CERTIFICATION}
+\end{center}
+
+\vspace{0.8em}
+
+\begin{center}
+  It is hereby certified that the Diploma Thesis titled
+\end{center}
+
+\vspace{0.5em}
+
+\begin{center}
+  {\bfseries Rate-Conditioned Post-Processing for Learned Point Cloud Compression}
+\end{center}
+
+\vspace{0.5em}
+
+\begin{center}
+  of the Department of Electrical and Computer Engineering student
+\end{center}
+
+\vspace{0.5em}
+
+\begin{center}
+  {\large\bfseries SPYRIDON SIANNAS}\\[0.4em]
+  Registration Number: 1053718
+\end{center}
+
+\vspace{0.6em}
+
+\begin{center}
+  was presented publicly at the Department of Electrical and Computer Engineering on\\
+  28th April 2026
+\end{center}
+
+\vspace{0.4em}
+
+\begin{center}
+  and was examined by the following examining committee:
+\end{center}
+
+\vspace{0.5em}
+
+\begin{center}
+  Moustakas Konstantinos, Professor, Supervisor\\[0.3em]
+  Skodras Athanasios, Emeritus Professor, Committee Member\\[0.3em]
+  Mourtzopulos Ioannis, Emeritus Professor, Committee Member
+\end{center}
+
+\vspace{1.2cm}
+
+\noindent
+\begin{minipage}[t]{0.46\linewidth}
+  The Supervisor\\[1.6cm]
+  \rule{5.5cm}{0.4pt}\\[0.4em]
+  Moustakas Konstantinos\\
+  Professor
+\end{minipage}%
+\hfill
+\begin{minipage}[t]{0.46\linewidth}
+  The Director of the Sector\\[1.6cm]
+  \rule{5.5cm}{0.4pt}\\[0.4em]
+  Koulouridis Stavros\\
+  Professor
+\end{minipage}
+
+\cleardoublepage
+
+% ============================================================
+% PAGE 7: Greek Title / Cover (UPatras official)
+% ============================================================
+\begin{titlepage}
+\thispagestyle{empty}
+\centering
+
+{\large\bfseries
+  \selectlanguage{greek}%
+  ΠΑΝΕΠΙΣΤΗΜΙΟ ΠΑΤΡΩΝ\,--\,ΠΟΛΥΤΕΧΝΙΚΗ ΣΧΟΛΗ\\[0.25em]
+  ΤΜΗΜΑ ΗΛΕΚΤΡΟΛΟΓΩΝ ΜΗΧΑΝΙΚΩΝ\\
+  ΚΑΙ ΤΕΧΝΟΛΟΓΙΑΣ ΥΠΟΛΟΓΙΣΤΩΝ%
+  \selectlanguage{english}%
+}
+
+\vspace{1.4em}
+
+\includegraphics[width=0.72\textwidth]{upatras_logo}
+
+\vspace{1.2em}
+
+{\small
+  \selectlanguage{greek}%
+  \textbf{Τομέας:} ΤΗΛΕΠΙΚΟΙΝΩΝΙΩΝ ΚΑΙ ΤΕΧΝΟΛΟΓΙΑΣ ΤΗΣ ΠΛΗΡΟΦΟΡΙΑΣ\\[0.2em]
+  \textbf{Εργαστήριο:} ΕΡΓΑΣΤΗΡΙΟ ΕΝΣΥΡΜΑΤΗΣ ΕΠΙΚΟΙΝΩΝΙΑΣ ΚΑΙ ΤΕΧΝΟΛΟΓΙΑΣ ΤΗΣ ΠΛΗΡΟΦΟΡΙΑΣ%
+  \selectlanguage{english}%
+}
+
+\vspace{1.0em}
+
+{\large\selectlanguage{greek}\underline{ΔΙΠΛΩΜΑΤΙΚΗ ΕΡΓΑΣΙΑ}\selectlanguage{english}}
+
+\vspace{0.6em}
+
+{\normalsize
+  \selectlanguage{greek}%
+  του φοιτητή του Τμήματος Ηλεκτρολόγων Μηχανικών και Τεχνολογίας\\
+  Υπολογιστών της Πολυτεχνικής Σχολής του Πανεπιστημίου Πατρών%
+  \selectlanguage{english}%
+}
+
+\vspace{0.8em}
+
+{\Large\bfseries\selectlanguage{greek}ΣΠΥΡΙΔΩΝ ΣΙΑΝΝΑΣ\selectlanguage{english}}\\[0.25em]
+{\small\selectlanguage{greek}Αριθμός Μητρώου: 1053718\selectlanguage{english}}
+
+\vspace{1.0em}
+
+{\normalsize\selectlanguage{greek}\underline{Θέμα}\selectlanguage{english}}
+
+\vspace{0.4em}
+
+{\large\bfseries
+  Rate-Conditioned Post-Processing\\[0.2em]
+  for Learned Point Cloud Compression%
+}
+
+\vspace{1.0em}
+
+{\normalsize\selectlanguage{greek}\underline{Επιβλέπων}\selectlanguage{english}}
+
+\vspace{0.4em}
+
+{\normalsize\selectlanguage{greek}Καθηγητής Μουστάκας Κωνσταντίνος\selectlanguage{english}}
+
+\vspace{0.5em}
+
+{\normalsize\selectlanguage{greek}Πάτρα, Μάρτιος 2026\selectlanguage{english}}
+
+\end{titlepage}
+
+% ============================================================
+% PAGE 9: Greek Plagiarism Declaration
+% ============================================================
+\cleardoublepage
+\thispagestyle{empty}
+\vspace*{3cm}
+
+\selectlanguage{greek}
+
+\begin{center}
+  {\normalsize Πανεπιστήμιο Πατρών, Τμήμα Ηλεκτρολόγων Μηχανικών και Τεχνολογίας Υπολογιστών}\\[0.5em]
+  {\large\bfseries Σπυρίδων Σιάννας}\\[0.5em]
+  {\normalsize \textcopyright\ 2026\,--\,Με επιφύλαξη παντός δικαιώματος}
+\end{center}
+
+\vspace{2em}
+
+\noindent Το σύνολο του περιεχομένου αυτής της εργασίας αποτελεί πρωτότυπο έργο του
+Σπυρίδωνα Σιάννα και δεν παραβιάζει με κανέναν τρόπο τα δικαιώματα τρίτων.
+Εφόσον η εργασία περιλαμβάνει υλικό που δεν έχει παραχθεί από τον ίδιο, αυτό είναι
+σαφώς ορατό και αναφέρεται ρητά στο κείμενο ως προϊόν τρίτου, σημειώνοντας με τον ίδιο
+σαφή τρόπο τα στοιχεία ταυτότητάς του, ενώ ταυτόχρονα επιβεβαιώνεται ότι, σε περίπτωση
+χρήσης πρωτότυπων γραφικών παραστάσεων, εικόνων, γραφημάτων κ.λπ., έχει λάβει την
+απεριόριστη άδεια του δικαιούχου για τη συμπερίληψη και την επακόλουθη δημοσίευση
+αυτού του υλικού.
+
+\selectlanguage{english}
+
+% ============================================================
+% PAGE 11: Greek Certification (ΠΙΣΤΟΠΟΙΗΣΗ)
+% ============================================================
+\cleardoublepage
+\thispagestyle{empty}
+\vspace*{1.5cm}
+
+\begin{center}
+  {\large\bfseries\selectlanguage{greek}ΠΙΣΤΟΠΟΙΗΣΗ\selectlanguage{english}}
+\end{center}
+
+\vspace{0.8em}
+
+\begin{center}
+  \selectlanguage{greek}Πιστοποιείται ότι η Διπλωματική Εργασία με τίτλο\selectlanguage{english}
+\end{center}
+
+\vspace{0.5em}
+
+\begin{center}
+  {\bfseries Rate-Conditioned Post-Processing for Learned Point Cloud Compression}
+\end{center}
+
+\vspace{0.5em}
+
+\begin{center}
+  \selectlanguage{greek}%
+  του φοιτητή του Τμήματος Ηλεκτρολόγων Μηχανικών\\
+  και Τεχνολογίας Υπολογιστών%
+  \selectlanguage{english}
+\end{center}
+
+\vspace{0.5em}
+
+\begin{center}
+  {\large\bfseries\selectlanguage{greek}ΣΠΥΡΙΔΩΝ ΣΙΑΝΝΑΣ ΤΟΥ ΧΡΗΣΤΟΥ\selectlanguage{english}}\\[0.4em]
+  \selectlanguage{greek}Αριθμός Μητρώου: 1053718\selectlanguage{english}
+\end{center}
+
+\vspace{0.6em}
+
+\begin{center}
+  \selectlanguage{greek}%
+  Παρουσιάστηκε δημόσια στο Τμήμα Ηλεκτρολόγων Μηχανικών\\
+  και Τεχνολογίας Υπολογιστών στις 28 Απριλίου 2026%
+  \selectlanguage{english}
+\end{center}
+
+\vspace{0.4em}
+
+\begin{center}
+  \selectlanguage{greek}%
+  και εξετάστηκε από την ακόλουθη εξεταστική επιτροπή:%
+  \selectlanguage{english}
+\end{center}
+
+\vspace{0.5em}
+
+\selectlanguage{greek}
+\begin{center}
+  Μουστάκας Κωνσταντίνος, Καθηγητής, Επιβλέπων\\[0.3em]
+  Σκόδρας Αθανάσιος, Ομότιμος Καθηγητής, Μέλος Εξεταστικής Επιτροπής\\[0.3em]
+  Μουρτζόπουλος Ιωάννης, Ομότιμος Καθηγητής, Μέλος Εξεταστικής Επιτροπής
+\end{center}
+
+\vspace{1.2cm}
+
+\noindent
+\begin{minipage}[t]{0.46\linewidth}
+  Ο Επιβλέπων\\[1.6cm]
+  \rule{5.5cm}{0.4pt}\\[0.4em]
+  Μουστάκας Κωνσταντίνος\\
+  Καθηγητής
+\end{minipage}%
+\hfill
+\begin{minipage}[t]{0.46\linewidth}
+  Ο Διευθυντής του Τομέα\\[1.6cm]
+  \rule{5.5cm}{0.4pt}\\[0.4em]
+  Κουλουρίδης Σταύρος\\
+  Καθηγητής
+\end{minipage}
+
+\selectlanguage{english}
+
+\cleardoublepage
+
+% ============================================================
+% Inner title page (fancy)
+% ============================================================
+\begin{titlepage}
+\thispagestyle{empty}
+\centering
+
+\vspace*{2.2cm}
+
+% ── Double rule (thick–thin) ────────────────────────────────────
+{\color{blue!30!black}\rule{\textwidth}{2.2pt}}\\[2.5pt]
+{\color{blue!30!black}\rule{\textwidth}{0.5pt}}
+
+\vspace{1.8cm}
+
+% ── Main title ──────────────────────────────────────────────────
+{\fontsize{24}{31}\selectfont\bfseries
+  Rate-Conditioned Post-Processing\\[0.45em]
+  for Learned Point Cloud Compression%
+}
+
+\vspace{0.95em}
+
+% ── Subtitle ────────────────────────────────────────────────────
+{\large\itshape\color{gray!55!black}
+  Diagnosing and Correcting Geometric Oversmoothing\\[0.2em]
+  in Learned Point Cloud Codecs%
+}
+
+\vspace{3.5cm}
+
+% ── Author block ────────────────────────────────────────────────
+{\color{blue!30!black}\rule{8.5cm}{0.5pt}}
+
+\vspace{0.75em}
+
+{\Large Spyridon Siannas}\\[0.45em]
+{\normalsize\itshape Supervised by Prof.\ Konstantinos Moustakas}\\[0.35em]
+{\normalsize University of Patras\quad$\cdot$\quad March 2026}
+
+\vfill
+
+% ── Double rule (thin–thick) ────────────────────────────────────
+{\color{blue!30!black}\rule{\textwidth}{0.5pt}}\\[2.5pt]
+{\color{blue!30!black}\rule{\textwidth}{2.2pt}}
+
+\end{titlepage}
+
+\cleardoublepage

@@ -1,0 +1,38 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{What drives the improvement.}
+The $+2.06$~dB edge gain at r2 closes approximately 85\% of the
+oversmoothing gap (which averages $\sim$2.4~dB across sequences at r2).
+The primary driver is the dynamic Chamfer Distance loss: without it,
+all displacement-based approaches fail due to zero-inflation (Table~\ref{tab:ablation-loss}).
+The FiLM conditioning adds a further $+0.44$~dB at r2 over the single-rate
+baseline model, a gain attributable to multi-rate regularisation.
+
+\paragraph{The edge-flat gap after post-processing.}
+After refinement at r2, the residual edge-flat gap is approximately
+$62.70 - 62.11 = 0.59$~dB (from Table~\ref{tab:absolute-psnr-results}).
+The residual gap is much smaller than the baseline $\sim$2.4~dB,
+but not eliminated.
+Two mechanisms limit further recovery:
+(a) the displacement formulation cannot add points at severely undersampled
+edge locations (where the codec has dropped entire voxels);
+(b) the backbone's $13^3$ voxel receptive field may be insufficient for
+fine structures smaller than one cell at the coarsest scale (level 3: $4\times$
+downsampled, i.e., $52^3$ voxels at full resolution).
+
+\paragraph{Processing efficiency.}
+The model processes a 750K-point frame in under 300~ms on a single RTX 3090 GPU,
+compared to the PCGCv2 decode step which takes 22--31 seconds.
+Post-processing adds approximately 1\% to the total decode latency,
+making it practical for batch applications.
+Real-time use ($< 33$~ms for 30 fps) would require further optimisation,
+primarily reducing the patch assembly and overlap averaging overhead.
+
+\paragraph{Rate generalisation.}
+The per-frame BPP rather than a nominal rate label is used for FiLM
+conditioning, which allows the model to handle variable-bitrate output
+(e.g., rate control enabled codecs) and codecs with different BPP ranges
+than PCGCv2.
+This is why the Unicorn and MVUB transfer experiments use BPP-corrected
+rate conditioning.

@@ -1,0 +1,49 @@
+\section{Evaluation Protocol}
+\label{sec:eval-protocol}
+
+\subsection{Test Set and Frames}
+
+The primary evaluation uses all 400 frames from the four 8iVFB sequences
+(100 frames per sequence), at three rate points: r2, r4, and r6.
+The four sequences differ substantially in surface complexity, providing a
+realistic spread of conditions.
+The \textit{redandblack} sequence serves as the validation set during training
+and is included in the test evaluation here, making it a within-distribution
+test; the other three sequences are out-of-training-distribution tests.
+
+\subsection{Inference Procedure}
+
+At inference time, each decoded frame $\hat{\pc}$ is processed by the model:
+\begin{enumerate}
+  \item Normalise coordinates to $[-1, 1]$ by dividing by the grid half-resolution
+    $G/2 = 512$.
+  \item Compute the log-BPP scalar $r = \log_2(\bpp_{\text{frame}})$ from the
+    actual number of compressed bits for this specific frame, rather than a
+    nominal rate-point value.
+    The model can then handle codecs with frame-level variable bitrates.
+  \item Extract overlapping $64^3$ patches with stride 32.
+  \item Run the network on each patch; assemble displacement predictions.
+    For points covered by multiple overlapping patches, average the predicted
+    displacements.
+  \item Add displacements to obtain the refined cloud:
+    $\hat{p}^{\text{ref}}_i = \hat{p}_i + \Delta_i$.
+\end{enumerate}
+Processing a full 8iVFB frame ($\sim$750\,000 points) takes under 300 ms on
+a single NVIDIA RTX 3090 GPU.
+
+\subsection{Metrics}
+
+For each frame and both the decoded and refined cloud, we compute:
+\begin{itemize}
+  \item \textbf{D1 PSNR}: standard aggregate point-to-point PSNR
+    (Section~\ref{ssec:d1-psnr}).
+  \item \textbf{Edge PSNR}: reverse-direction D1 PSNR for the top-tercile
+    curvature stratum (Section~\ref{ssec:curvature-stratified}).
+  \item \textbf{Flat PSNR}: reverse-direction D1 PSNR for the bottom-tercile
+    stratum.
+\end{itemize}
+Results are reported as mean $\delta = \text{PSNR}_{\text{refined}} - \text{PSNR}_{\text{decoded}}$
+over all frames of each sequence.
+The $\delta$ convention is used throughout so that positive values indicate improvement.
+
+% ============================================================

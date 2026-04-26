@@ -1,0 +1,430 @@
+\section{Deep Learning for Sparse 3D Point Clouds}
+\label{sec:deep-learning-3d}
+
+\subsection{Sparse Convolutions}
+\label{ssec:sparse-conv}
+
+Standard 3D convolutions applied to a $G^3$ voxel grid have memory and
+computational complexity $O(G^3)$, which is $O(10^9)$ for $G = 1024$.
+Sparse convolutions~\cite{graham2015sparse,choy2019minkowski} restrict
+computation to the active (occupied) voxels, achieving $O(N)$ complexity
+where $N \ll G^3$ is the number of occupied voxels.
+
+\paragraph{Generalised sparse convolution.}
+For an input sparse tensor $(\mathbf{C}^{in}, \mathbf{F}^{in})$ and a kernel
+$\mathbf{W}$ with offsets $\mathcal{O} = \{o_1, \ldots, o_{k^3}\}$
+(the $k^3$ cells of a $k\times k\times k$ kernel), the output at coordinate
+$u \in \mathcal{C}^{out}$ is:
+\begin{equation}
+  \mathbf{f}^{out}_u = \sum_{i : (u + o_i) \in \mathcal{C}^{in}}
+    \mathbf{W}_i \mathbf{f}^{in}_{u + o_i} + \mathbf{b}.
+  \label{eq:sparse-conv}
+\end{equation}
+The inner sum runs only over the subset of kernel offsets $o_i$ for which
+the corresponding input coordinate $u + o_i$ is active.
+The output coordinates $\mathcal{C}^{out}$ are determined by the kernel map
+(the precomputed mapping from output to active input coordinates), which is
+built once during the forward pass and reused for the backward pass.
+
+\paragraph{Stride-2 sparse convolution (downsampling).}
+A stride-2 sparse convolution halves the spatial resolution of the active
+coordinate set: each output coordinate $u \in \mathcal{C}^{out}$ corresponds
+to input coordinates in a $k\times k\times k$ neighbourhood of $2u$
+(in the input coordinate system).
+This reduces the number of active coordinates by approximately a factor of 8,
+while doubling the effective receptive field.
+
+\paragraph{Transposed sparse convolution (upsampling).}
+A transposed (stride-2) sparse convolution inverts the downsampling:
+given a coarse active coordinate set, it expands each coordinate to up to 8
+output coordinates, recovering the original spatial resolution.
+The output feature at each expanded coordinate accumulates contributions from
+nearby input features according to the transposed kernel map.
+
+\paragraph{Submanifold sparse convolution.}
+A submanifold sparse convolution~\cite{graham20183d} preserves the active
+coordinate set exactly: $\mathcal{C}^{out} = \mathcal{C}^{in}$.
+This avoids the activations spreading out from the surface into empty space
+during processing.
+All intermediate (same-stride) convolutions in our backbone use submanifold
+mode; only downsampling and upsampling layers change the active set.
+Figure~\ref{fig:sparse-conv} contrasts dense, generalised sparse, and submanifold
+convolutions on a 2D grid analogy.
+
+\begin{figure}[t]
+\centering
+\resizebox{0.92\linewidth}{!}{%
+\begin{tikzpicture}[>=Stealth, every node/.style={font=\scriptsize}]
+  \def\cs{0.55}  % cell size
+
+  % ===== (a) Dense convolution =====
+  % Input: all cells filled
+  \foreach \i in {0,...,4}
+    \foreach \j in {0,...,4} {
+      \fill[blue!18]  ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+      \draw[gray!45, very thin] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+    }
+  % RF: rows i=1..3, cols j=1..3 — fully inside grid
+  \draw[red!80, very thick] ({\cs},{-3*\cs}) rectangle ++({3*\cs},{3*\cs});
+  \node[below, align=center] at ({2.5*\cs},{-5*\cs-0.18})
+    {(a) Dense input\\(all active)};
+
+  % Arrow
+  \node[font=\normalsize] at ({5*\cs+0.4},{-2.5*\cs}) {$\to$};
+
+  % Dense output (all active)
+  \begin{scope}[xshift={5*\cs cm + 0.75cm}]
+    \foreach \i in {0,...,4}
+      \foreach \j in {0,...,4} {
+        \fill[green!20] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+        \draw[gray!40, very thin] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+      }
+    \node[below, align=center] at ({2.5*\cs},{-5*\cs-0.18})
+      {Dense output\\(all active)};
+  \end{scope}
+
+  % ===== (b) Sparse (generalised) convolution =====
+  \def\spoff{6.80}  % x-offset for sparse section (in cm)
+
+  % Separator
+  \draw[gray!35, dashed, thin] ({\spoff-0.25},{ 0.6}) -- ({\spoff-0.25},{-3.5});
+
+  % Sparse input
+  \begin{scope}[xshift=\spoff cm]
+    \foreach \i in {0,...,4}
+      \foreach \j in {0,...,4}
+        \draw[gray!28, very thin] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+    % Active input cells (sparse pattern)
+    \foreach \i/\j in {0/2, 1/1, 1/4, 2/0, 2/3, 3/2, 3/4, 4/1} {
+      \fill[blue!30] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+      \draw[blue!50, very thin] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+    }
+    % RF: rows i=1..3, cols j=1..3 — same position as panel (a)
+    \draw[red!80, very thick] ({\cs},{-3*\cs}) rectangle ++({3*\cs},{3*\cs});
+    \node[below, align=center] at ({2.5*\cs},{-5*\cs-0.18})
+      {(b) Sparse input\\(few active)};
+  \end{scope}
+
+  % Arrow
+  \node[font=\normalsize] at ({\spoff+5*\cs+0.4},{-2.5*\cs}) {$\to$};
+
+  % Sparse output (expanded active set)
+  \begin{scope}[xshift={\spoff cm + 5*\cs cm + 0.75cm}]
+    \foreach \i in {0,...,4}
+      \foreach \j in {0,...,4}
+        \draw[gray!28, very thin] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+    % Expanded output cells (more active than input)
+    \foreach \i/\j in {0/1,0/2,0/3, 1/0,1/1,1/2,1/3, 2/0,2/1,2/2,2/3,2/4, 3/1,3/2,3/3,3/4} {
+      \fill[green!32] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+      \draw[green!60, very thin] ({\j*\cs},{-\i*\cs}) rectangle ++({\cs},{\cs});
+    }
+    \node[below, align=center] at ({2.5*\cs},{-5*\cs-0.18})
+      {Output expands\\(more active)};
+  \end{scope}
+
+\end{tikzpicture}%
+}
+\caption{%
+  Dense convolution vs.\ sparse convolution (2D analogy).
+  (a) Dense: kernel applied at every position, output is fully dense.
+  (b) Generalised sparse: kernel applied only where input is active (blue),
+  but output can activate new positions within each kernel's reach (shown in green).
+  Submanifold sparse convolution (not shown) restricts $\mathcal{C}^{out} = \mathcal{C}^{in}$,
+  preventing activation spread.
+}
+\label{fig:sparse-conv}
+\end{figure}
+
+\subsection{Residual Blocks for Sparse Tensors}
+
+Residual blocks~\cite{he2016deep} are adapted straightforwardly to sparse
+tensors by replacing dense 2D convolutions with submanifold sparse convolutions:
+\begin{equation}
+  \mathbf{F}^{out} = \mathbf{F}^{in} +
+    \text{SubConv}_{3^3}\!\left(
+      \text{ReLU}\!\left(
+        \text{BN}\!\left(
+          \text{SubConv}_{3^3}(\mathbf{F}^{in})
+        \right)
+      \right)
+    \right),
+\end{equation}
+where BN denotes batch normalisation applied to the feature matrix $\mathbf{F}$
+(across the $N$ active coordinates per channel) and SubConv$_{3^3}$ is a
+submanifold $3\times3\times3$ sparse convolution.
+The skip connection is exact: since SubConv preserves the active coordinate set,
+the input and output feature matrices have the same number of rows and can
+be added directly.
+Figure~\ref{fig:resblock} shows the sparse residual block structure.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[>=Stealth, every node/.style={font=\small},
+  box/.style={draw, rounded corners=3pt, inner sep=6pt, align=center,
+              minimum width=3.6cm, minimum height=0.60cm}]
+  % Main vertical path
+  \node[box, fill=gray!10]  (in)  at (0,  0.0) {$\mathbf{F}^{in}$\enspace$(N \times C)$};
+  \node[box, fill=blue!12]  (c1)  at (0, -1.3) {SubConv$_{3^3}$,\ BN,\ ReLU};
+  \node[box, fill=blue!12]  (c2)  at (0, -2.6) {SubConv$_{3^3}$,\ BN};
+  \node[circle, draw, fill=orange!22, inner sep=5pt] (add) at (0,-3.7) {$+$};
+  \node[box, fill=gray!10]  (out) at (0, -5.0) {$\mathbf{F}^{out}$\enspace$(N \times C)$};
+  % Main path arrows
+  \draw[->] (in)  -- (c1);
+  \draw[->] (c1)  -- (c2);
+  \draw[->] (c2)  -- (add);
+  \draw[->] (add) -- node[right, font=\scriptsize]{ReLU} (out);
+  % Identity skip connection (routes cleanly to the right)
+  \draw[->, blue!55, thick]
+    (in.east) -- ++(1.8,0) -- ++(0,-3.7) -- (add.east);
+  \node[rotate=-90, font=\scriptsize, blue!70] at (2.15, -1.85) {identity skip};
+\end{tikzpicture}
+\caption{%
+  Sparse residual block for point cloud processing.
+  Two submanifold $3^3$ sparse convolutions (with batch normalisation and ReLU)
+  are stacked; the input is added via an identity skip connection.
+  Because SubConv preserves the active coordinate set, the skip connection
+  requires no projection or resampling.
+}
+\label{fig:resblock}
+\end{figure}
+
+\subsection{Batch Normalisation}
+\label{ssec:batch-norm}
+
+Batch normalisation~\cite{ioffe2015batch} normalises each feature channel
+across the batch and spatial dimensions:
+\begin{equation}
+  \hat{f}^{(c)}_{n,i} = \frac{f^{(c)}_{n,i} - \mu^{(c)}}{\sqrt{(\sigma^{(c)})^2 + \epsilon}},
+  \qquad
+  \text{BN}(f^{(c)}_{n,i}) = \gamma^{(c)} \hat{f}^{(c)}_{n,i} + \beta^{(c)},
+\end{equation}
+where $\mu^{(c)}$ and $\sigma^{(c)}$ are the mean and standard deviation of
+channel $c$ across all active coordinates in the mini-batch, and
+$\gamma^{(c)}, \beta^{(c)}$ are learned affine parameters.
+For sparse tensors, the batch statistics are computed across all $N \times B$
+active coordinates in a mini-batch of size $B$, where $N$ varies per sample.
+At inference time, running statistics accumulated during training are used.
+
+\subsection{Encoder-Decoder Architecture (U-Net)}
+\label{ssec:unet-theory}
+
+The U-Net architecture~\cite{ronneberger2015unet} consists of a contracting
+encoder path, a bottleneck, and an expanding decoder path with skip connections.
+Applied to sparse point clouds with sparse convolutions, this gives:
+
+\begin{align}
+  \text{Encoder level } \ell: &\quad
+    \mathbf{F}^{enc}_\ell = \text{SubConv}(\mathbf{F}^{enc}_{\ell-1}),
+    \quad \mathbf{F}^{enc}_{\ell+1} = \text{StrideConv}(\mathbf{F}^{enc}_\ell) \\
+  \text{Decoder level } \ell: &\quad
+    \mathbf{F}^{dec}_\ell = \text{SubConv}([\mathbf{F}^{enc}_\ell;\, \text{Up}(\mathbf{F}^{dec}_{\ell+1})])
+\end{align}
+where $\text{Up}$ denotes transposed stride-2 convolution and $[\cdot\,;\,\cdot]$
+is feature concatenation.
+
+The key motivation for skip connections in point cloud processing is the same
+as in image segmentation: the encoder's strided convolutions discard
+high-resolution detail in exchange for larger receptive fields; skip connections
+restore that detail to the decoder, which must produce high-resolution
+per-point predictions.
+Without skip connections, the network can only use low-resolution context
+from the bottleneck, severely limiting its ability to localise fine geometric
+corrections.
+Figure~\ref{fig:unet-concept} illustrates the encoder-decoder pattern with
+skip connections.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[>=Stealth, every node/.style={font=\small},
+  box/.style={draw, rounded corners=2pt, minimum width=1.5cm,
+              minimum height=0.5cm, inner sep=4pt, align=center}]
+  % Encoder (left column)
+  \node[box, fill=blue!15] (e1) at (0,  0)   {$\mathbf{F}_1$\\{\tiny 32 ch}};
+  \node[box, fill=blue!20] (e2) at (0, -1.3) {$\mathbf{F}_2$\\{\tiny 64 ch}};
+  \node[box, fill=blue!30] (e3) at (0, -2.6) {$\mathbf{F}_3$\\{\tiny 128 ch}};
+  % Decoder (right column, mirrored)
+  \node[box, fill=teal!30] (d3) at (4, -2.6) {$\mathbf{G}_3$\\{\tiny 128 ch}};
+  \node[box, fill=teal!20] (d2) at (4, -1.3) {$\mathbf{G}_2$\\{\tiny 64 ch}};
+  \node[box, fill=teal!15] (d1) at (4,  0)   {$\mathbf{G}_1$\\{\tiny 32 ch}};
+  % Output
+  \node[box, fill=gray!15] (out) at (4, 1.3) {Output};
+  % Encoder downward path
+  \draw[->] (e1) -- node[right,font=\scriptsize]{$\times 2\!\downarrow$} (e2);
+  \draw[->] (e2) -- node[right,font=\scriptsize]{$\times 2\!\downarrow$} (e3);
+  % Bottleneck (straight horizontal at bottom level)
+  \draw[->, thick] (e3) -- node[above,font=\scriptsize]{bottleneck} (d3);
+  % Decoder upward path
+  \draw[->] (d3) -- node[right,font=\scriptsize]{$\div 2\!\uparrow$} (d2);
+  \draw[->] (d2) -- node[right,font=\scriptsize]{$\div 2\!\uparrow$} (d1);
+  \draw[->] (d1) -- (out);
+  % Skip connections (horizontal at matching levels)
+  \draw[->, dashed, blue!60, thick] (e1.east) --
+    node[above,font=\scriptsize,blue!80]{skip} (d1.west);
+  \draw[->, dashed, blue!60, thick] (e2.east) --
+    node[above,font=\scriptsize,blue!80]{skip} (d2.west);
+  % Column labels
+  \node[blue!60, font=\small\bfseries, left] at (-1.0,-1.3) {Encoder};
+  \node[teal!70!black, font=\small\bfseries, right] at (5.1,-1.3) {Decoder};
+\end{tikzpicture}
+\caption{%
+  U-Net encoder-decoder with skip connections.
+  The encoder contracts the spatial resolution while expanding the channel
+  dimension (building global context); the decoder expands back to full
+  resolution.
+  Skip connections (dashed) concatenate high-resolution encoder features
+  directly to the decoder, preserving fine-grained spatial detail that the
+  bottleneck representation has lost.
+}
+\label{fig:unet-concept}
+\end{figure}
+
+\subsection{Feature-wise Linear Modulation (FiLM)}
+\label{ssec:film}
+
+Feature-wise Linear Modulation (FiLM)~\cite{perez2018film} is a general
+mechanism for conditioning a neural network on an external context signal,
+without modifying the core network architecture.
+Given intermediate feature maps $\mathbf{h} \in \R^{N \times C}$ (where $N$
+is the batch dimension and $C$ the channel dimension) and a conditioning input
+$\mathbf{c}$ (a scalar, vector, or embedding), FiLM applies a learned
+per-channel affine transformation:
+\begin{equation}
+  \text{FiLM}(\mathbf{h};\,\mathbf{c}) = \boldsymbol{\gamma}(\mathbf{c}) \odot \mathbf{h}
+    + \boldsymbol{\beta}(\mathbf{c}),
+  \qquad \boldsymbol{\gamma},\, \boldsymbol{\beta} \in \R^C,
+\end{equation}
+where $\boldsymbol{\gamma}(\mathbf{c})$ and $\boldsymbol{\beta}(\mathbf{c})$
+are produced by a conditioning network (typically a small MLP) applied to $\mathbf{c}$.
+The $\odot$ denotes channel-wise scaling (broadcast over spatial dimensions).
+
+\paragraph{Historical context.}
+FiLM was introduced~\cite{perez2018film} for visual question answering, where
+the conditioning signal is a language embedding encoding the question.
+The key insight was that allowing the question to modulate intermediate visual
+feature maps (rather than only entering at the first or last layer),
+dramatically improving the model's ability to selectively attend to question-relevant
+image regions.
+The mechanism has since been applied to multi-task
+learning~\cite{rebuffi2018efficient}, style transfer, and physics
+simulation~\cite{gupta2023pde}, in each case using a domain or parameter
+embedding to steer a shared backbone without updating its weights.
+
+In this work, the conditioning signal is the compression bitrate
+($r = \log_2(\bpp)$), allowing a single post-processing model to adapt its
+displacement predictions across multiple rate-distortion operating points
+without separate models per rate.
+Figure~\ref{fig:film-diagram} illustrates the FiLM conditioning mechanism.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[>=Stealth, every node/.style={font=\small},
+  box/.style={draw, rounded corners=3pt, inner sep=5pt, align=center,
+              minimum height=0.58cm},
+  op/.style={circle, draw, inner sep=4pt, font=\small, line width=0.7pt}]
+
+  % ---- Top row: feature flow ----
+  \node[box, fill=blue!10, minimum width=1.8cm] (fin)  at (0.0, 0) {$\mathbf{h}$};
+  \node[op,  fill=orange!25, draw=orange!60]    (mul)  at (2.6, 0) {$\odot$};
+  \node[op,  fill=orange!25, draw=orange!60]    (add)  at (4.6, 0) {$+$};
+  \node[box, fill=blue!10, minimum width=1.8cm] (fout) at (7.0, 0) {$\mathbf{h}'$};
+
+  % ---- γ and β directly below mul and add ----
+  \node[box, fill=orange!18, draw=orange!50, minimum width=1.5cm]
+    (gam) at (2.6, -1.4) {$\boldsymbol{\gamma}{\in}\mathbb{R}^C$};
+  \node[box, fill=orange!18, draw=orange!50, minimum width=1.5cm]
+    (bet) at (4.6, -1.4) {$\boldsymbol{\beta}{\in}\mathbb{R}^C$};
+
+  % ---- MLP below centre ----
+  \node[box, fill=orange!10, draw=orange!40, minimum width=3.0cm]
+    (mlp) at (3.6, -2.7) {MLP\enspace{\scriptsize $\mathbb{R}^1 \!\to\! \mathbb{R}^{64} \!\to\! \mathbb{R}^{2C}$}};
+
+  % ---- Rate scalar ----
+  \node[box, fill=gray!8, minimum width=2.4cm]
+    (r) at (3.6, -3.9) {$r = \log_2(\mathrm{bpp})$};
+
+  % ---- Feature flow arrows ----
+  \draw[->] (fin) -- (mul);
+  \draw[->] (mul) -- (add);
+  \draw[->] (add) -- (fout);
+
+  % ---- Conditioning: straight vertical arrows ----
+  \draw[->, orange!65, thick] (gam) -- (mul);
+  \draw[->, orange!65, thick] (bet) -- (add);
+
+  % ---- MLP splits to γ and β ----
+  \draw[->] (mlp.north) -- ++(0,0.12) -| (gam.south);
+  \draw[->] (mlp.north) -- ++(0,0.12) -| (bet.south);
+
+  % ---- Rate to MLP ----
+  \draw[->] (r) -- (mlp);
+
+  % ---- Equation (above feature flow) ----
+  \node[font=\small, above] at (3.4, 0.4)
+    {$\mathbf{h}' = \boldsymbol{\gamma}(r) \odot \mathbf{h} + \boldsymbol{\beta}(r)$};
+\end{tikzpicture}
+\caption{%
+  Feature-wise Linear Modulation (FiLM).
+  A small MLP maps the conditioning signal $r$ (here: $\log_2(\mathrm{bpp})$)
+  to per-channel scale $\boldsymbol{\gamma}$ and shift $\boldsymbol{\beta}$ vectors.
+  These are applied channel-wise to the intermediate feature maps $\mathbf{h}$,
+  conditioning the entire learned representation on the rate without modifying
+  the backbone architecture.
+}
+\label{fig:film-diagram}
+\end{figure}
+
+\paragraph{Why FiLM over other conditioning approaches.}
+Alternative conditioning strategies include:
+\begin{itemize}
+  \item \textit{Input concatenation}: append the rate scalar to each point's
+    feature vector before processing.
+    This only injects the conditioning signal at the first layer and requires
+    the network to propagate it through multiple non-linear transformations.
+  \item \textit{Output gating}: multiply the final displacement by a scalar
+    function of the rate.
+    This adjusts magnitude only, not the pattern of corrections.
+  \item \textit{Separate models}: train one model per rate.
+    This eliminates rate generalisation and increases parameter count linearly.
+\end{itemize}
+FiLM acts on intermediate features, conditioning the entire learned
+representation on the rate. It adds minimal parameters (one MLP per modulated
+layer) while providing maximum flexibility: the network can learn different
+correction \emph{patterns} at different rates, not just different
+magnitudes.
+
+\subsection{Chamfer Distance}
+\label{ssec:chamfer}
+
+The Chamfer Distance (CD)~\cite{fan2017pointset} between two point sets $S$ and $T$ is:
+\begin{equation}
+  \CD(S, T) = \frac{1}{|S|}\sum_{s \in S} \min_{t \in T} \|s - t\|^2
+            + \frac{1}{|T|}\sum_{t \in T} \min_{s \in S} \|t - s\|^2.
+\end{equation}
+The first term (forward direction, $S \to T$) penalises points in $S$ that
+have no nearby counterpart in $T$: false negatives from $S$'s perspective.
+The second term (reverse direction, $T \to S$) penalises points in $T$ with
+no counterpart in $S$: false positives in $T$.
+
+\paragraph{Differentiability.}
+CD is differentiable with respect to the coordinates of points in $S$:
+for each $s \in S$, its nearest neighbour $t^* = \arg\min_t \|s-t\|^2$ is
+a constant (in the backward pass), so $\partial \|s - t^*\|^2 / \partial s = 2(s - t^*)$.
+This makes CD usable as a training loss for point position regression.
+
+\paragraph{Computational complexity.}
+Naively, CD requires $O(|S||T|)$ nearest-neighbour queries.
+For patches of $\sim$500 points, this is manageable; for full point clouds of
+$\sim$800\,000 points, efficient KD-tree or GPU ball-query~\cite{qi2017pointnetplusplus} implementations
+are required.
+In this work, CD is computed on small patches during training; at evaluation
+time, per-point D1 PSNR is used instead.
+
+\paragraph{Relation to D1 PSNR.}
+The D1 PSNR metric (Section~\ref{ssec:d1-psnr}) uses the maximum of the
+two directional nearest-neighbour distances and normalises by the bounding
+box diagonal, while CD uses the symmetric mean and does not normalise.
+CD is more symmetric and better suited as a training loss; D1 PSNR is more
+interpretable as a quality metric.
+
+
+% ============================================================

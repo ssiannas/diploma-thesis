@@ -1,0 +1,42 @@
+% ============================================================
+%  English Abstract
+% ============================================================
+\chapter*{Abstract}
+\addcontentsline{toc}{chapter}{Abstract}
+
+Learned point cloud codecs achieve competitive rate-distortion performance
+against traditional standards, but introduce a systematic geometric artifact:
+oversmoothing, concentrated at high-curvature regions such as edges, ridges,
+and fine surface structures. Standard aggregate metrics such as D1~PSNR average
+over the entire surface, masking this spatially non-uniform degradation entirely.
+
+This thesis makes two principal contributions.
+First, we introduce a \emph{curvature-stratified PSNR metric} that partitions
+points by local surface curvature and evaluates quality separately for edge and
+flat regions, exposing degradation that aggregate metrics cannot capture.
+Second, we propose a \emph{rate-conditioned sparse U-Net post-processing network}
+that corrects geometric distortions in decoded point clouds without modifying the
+underlying codec.
+A single 2.5M-parameter model handles multiple bitrates via a Feature-wise
+Linear Modulation (FiLM) head that adapts displacement predictions to the
+compression rate, conditioned on the log-scaled bits-per-point scalar.
+
+Using the curvature-stratified metric, we quantify oversmoothing in PCGCv2
+across four sequences of the 8i~Voxelized Full Bodies (8iVFB) dataset at three
+operating rates, finding edge-region quality consistently 2--4.5~dB below
+flat-region quality, with the gap widening at higher rates.
+The post-processing network, trained with a dynamic Chamfer Distance loss on
+decoded-to-original cloud crops, recovers \textbf{+2.06~dB} of edge-region PSNR
+at the lowest evaluated rate, \textbf{+0.58~dB} at medium rate, and
+\textbf{+0.27~dB} at high rate, averaged across sequences and frames.
+Zero-shot transfer experiments to an unseen codec (Unicorn) and an unseen
+dataset (MVUB) demonstrate that low-rate oversmoothing is a failure mode
+common to multiple learned codecs and that the correction generalizes without
+retraining.
+
+\vspace{1em}
+\noindent\textbf{Keywords:}
+point cloud compression, post-processing, oversmoothing, curvature,
+sparse convolutions, FiLM conditioning, rate-distortion, PCGCv2.
+
+\cleardoublepage

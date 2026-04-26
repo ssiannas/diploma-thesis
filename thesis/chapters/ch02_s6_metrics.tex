@@ -1,0 +1,133 @@
+\section{Quality Metrics for Point Cloud Compression}
+\label{sec:metrics}
+
+\subsection{Point-to-Point PSNR (D1)}
+\label{ssec:d1-psnr}
+
+The point-to-point PSNR (D1) is the standard metric used in MPEG point cloud
+codec evaluations~\cite{tian2017geometric}.
+For a reconstructed cloud $\hat{\pc}$ and original $\pc$, two directional
+mean squared errors are computed:
+\begin{align}
+  e_{\text{fwd}} &= \frac{1}{|\pc|}\sum_{p \in \pc} \min_{\hat{p} \in \hat{\pc}} \|p - \hat{p}\|^2, \\
+  e_{\text{rev}} &= \frac{1}{|\hat{\pc}|}\sum_{\hat{p} \in \hat{\pc}} \min_{p \in \pc} \|\hat{p} - p\|^2.
+\end{align}
+The D1 PSNR is:
+\begin{equation}
+  \PSNR_{\text{D1}} = 10\log_{10}\!\left(\frac{d_{\max}^2}{\max(e_{\text{fwd}},\, e_{\text{rev}})}\right),
+\end{equation}
+where $d_{\max}$ is the diagonal of the axis-aligned bounding box of the
+original cloud, used as the peak signal value.
+Taking the maximum of the two directions ensures that both missing coverage
+(forward) and spurious points (reverse) are penalised.
+
+\paragraph{Limitation of D1.}
+D1 averages over all $N$ points with equal weight, regardless of their
+geometric role.
+A point cloud in which 90\% of points lie on flat surfaces and 10\% on edges
+will have its D1 PSNR dominated by flat-region fidelity.
+A codec that faithfully reconstructs the flat regions while systematically
+erasing all edges can report high D1 PSNR that does not reflect the
+perceptual quality loss.
+
+This limitation motivates the curvature-stratified metric introduced in
+Section~\ref{ssec:curvature-stratified}.
+
+\subsection{Point-to-Plane PSNR (D2)}
+
+Point-to-plane PSNR (D2) replaces the Euclidean nearest-neighbour distance
+with its projection onto the reference surface normal $\mathbf{n}_p$:
+\begin{equation}
+  e_{\text{D2}} = \frac{1}{|\pc|}\sum_{p \in \pc}
+    \left\langle p - \hat{p}^*,\, \mathbf{n}_p \right\rangle^2,
+  \qquad \hat{p}^* = \arg\min_{\hat{p}} \|p - \hat{p}\|^2.
+\end{equation}
+This is perceptually motivated: displacements tangential to the surface are
+less visible than those in the normal direction.
+D2 requires reliable normal estimation at each reference point; for voxelized
+clouds at integer positions, normals are estimated from the same
+$k$-NN covariance analysis as curvature.
+D2 correlates with D1 for most evaluation scenarios~\cite{tian2017geometric}; this work uses D1
+as the primary metric for reproducibility.
+
+\subsection{Curvature-Stratified PSNR (This Work)}
+\label{ssec:curvature-stratified}
+
+The curvature-stratified PSNR metric introduced in this thesis addresses the
+averaging limitation of D1 by evaluating quality separately within surface
+strata defined by local curvature.
+The metric is applied throughout Chapters~\ref{ch:oversmoothing}
+and~\ref{ch:results}.
+
+\paragraph{Step 1: Curvature estimation.}
+For each point $p$ in the \emph{original} cloud $\pc$, compute the surface
+variation $\kappa(p)$ using the $k = 30$ nearest neighbours
+(Section~\ref{ssec:curvature-theory}).
+
+\paragraph{Step 2: Percentile stratification.}
+Sort all $|\pc|$ points by their curvature and compute the 33rd and 67th
+percentiles $\kappa_{33}$ and $\kappa_{67}$.
+Partition into three strata:
+\begin{align}
+  \mathcal{S}_{\text{flat}} &= \{p \in \pc : \kappa(p) \leq \kappa_{33}\}, \\
+  \mathcal{S}_{\text{mid}}  &= \{p \in \pc : \kappa_{33} < \kappa(p) \leq \kappa_{67}\}, \\
+  \mathcal{S}_{\text{edge}} &= \{p \in \pc : \kappa(p) > \kappa_{67}\}.
+\end{align}
+Each stratum contains exactly $|\pc|/3$ points (up to rounding).
+Percentile-based thresholds are adaptive: they are specific to each individual
+cloud, ensuring that the ``edge'' stratum always identifies the most curved
+third of \emph{this} cloud, regardless of its overall curvature level.
+This avoids the dataset dependence of a fixed absolute threshold.
+
+\paragraph{Step 3: Per-stratum reverse PSNR.}
+For each stratum $\mathcal{S} \in \{\mathcal{S}_{\text{flat}}, \mathcal{S}_{\text{mid}}, \mathcal{S}_{\text{edge}}\}$:
+\begin{equation}
+  \PSNR_{\mathcal{S}} = 10\log_{10}\!\left(
+    \frac{d_{\max}^2}{\frac{1}{|\mathcal{S}|}\sum_{p \in \mathcal{S}}
+      \min_{\hat{p} \in \hat{\pc}} \|p - \hat{p}\|^2}
+  \right).
+  \label{eq:stratified-psnr}
+\end{equation}
+
+\paragraph{Why the reverse direction.}
+The curvature label is computed on the \emph{original} cloud, where curvature
+is geometrically meaningful and stable.
+In the \emph{reverse} direction (Equation~\ref{eq:stratified-psnr}),
+the outer sum runs over original points and the inner minimisation is over
+reconstructed points.
+This measures: \textit{for each original edge point, how well is it covered
+by the reconstruction?}
+
+The forward direction (reconstructed-to-original) would require curvature
+labels on the decoded cloud, where oversmoothing has already reduced curvature
+at edge regions.
+A decoded cloud that completely erases an edge will have \emph{no} decoded
+points in the edge region, so the forward direction would simply skip those
+points, producing optimistic edge PSNR.
+The reverse direction is immune to this: it always queries the coverage of
+original edge points, regardless of what the decoder produced.
+
+\paragraph{Degradation gap.}
+The primary diagnostic is:
+\begin{equation}
+  \Delta_{\text{smooth}} = \PSNR_{\text{flat}} - \PSNR_{\text{edge}} \geq 0,
+\end{equation}
+which is positive when flat regions are reconstructed better than edges
+(the oversmoothing signature).
+A post-processing correction that reduces $\Delta_{\text{smooth}}$ is
+specifically targeting the most harmful codec artifact.
+
+\subsection{Bjontegaard Delta (BD) Metrics}
+\label{ssec:bd}
+
+Bjontegaard Delta metrics~\cite{bjontegaard2001calculation} summarise codec
+comparisons over an entire rate-distortion curve, rather than at a single
+operating point.
+Given two R-D curves (e.g., baseline PCGCv2 and post-processed),
+BD-PSNR is the average PSNR gain at the same bitrate, and BD-rate is the
+average bitrate saving at the same PSNR, each computed by integrating the
+difference of piecewise cubic polynomial fits to the curves.
+
+In this work, BD-PSNR is computed over the three evaluated rate points
+(r2, r4, r6), providing a single-number summary of the post-processing
+improvement across the evaluated rate range.

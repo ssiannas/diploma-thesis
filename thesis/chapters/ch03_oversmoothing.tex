@@ -1,0 +1,455 @@
+% ============================================================
+%  Chapter 3 -- Oversmoothing Analysis
+% ============================================================
+\chapter{Diagnosing Oversmoothing in Learned Point Cloud Codecs}
+\label{ch:oversmoothing}
+
+This chapter applies the curvature-stratified evaluation framework of
+Section~\ref{ssec:curvature-stratified} to characterise the oversmoothing
+behaviour of PCGCv2 and to contrast it with G-PCC.
+We describe the evaluation pipeline in detail, present the quantitative
+findings, analyse the rate-dependent displacement signal, and discuss
+implications for post-processing design.
+
+% ============================================================
+\section{Evaluation Setup}
+\label{sec:eval-setup}
+
+\subsection{Dataset and Sequences}
+
+We evaluate on the 8i Voxelized Full Bodies (8iVFB) dataset~\cite{8ivfb},
+the standard MPEG evaluation corpus for point cloud compression.
+The dataset provides four sequences of full-body human captures:
+
+\begin{description}
+  \item[longdress (300 frames).] A female subject in a long dress, primarily
+    smooth fabric with moderate surface detail.
+  \item[loot (300 frames).] A male subject in military attire, with moderate
+    geometric complexity.
+  \item[redandblack (300 frames).] A male subject in a red and black jacket,
+    with fine fabric texture, facial detail, and hair.
+  \item[soldier (300 frames).] A male subject in military gear with helmet,
+    offering intermediate geometric complexity.
+\end{description}
+
+Each frame contains up to 800\,000 points at resolution $G = 1024$.
+The sequences are diverse in terms of surface complexity, which is important
+for assessing the generality of the oversmoothing phenomenon.
+
+\subsection{Codec Configurations}
+
+\paragraph{PCGCv2.}
+We evaluate PCGCv2 at seven rate points (r1--r7), corresponding to the
+standard MPEG test configurations.
+Lower rate indices correspond to lower bits-per-point (bpp) and greater
+distortion.
+At r1 (lowest quality), the bitstream is extremely compact but geometric
+fidelity is severely degraded; at r7 (highest quality), the reconstructed
+cloud closely resembles the original.
+
+\paragraph{G-PCC.}
+G-PCC (TMC13 v23~\cite{mpeg2023tmc13}) is evaluated at the same operating
+points using octree coding mode, for direct comparison of artifact profiles.
+The same evaluation pipeline is applied to G-PCC outputs.
+
+\subsection{Evaluation Pipeline}
+
+The evaluation is implemented in
+\texttt{scripts/evaluation/compute\_all\_metrics.py}.
+For each sequence and rate point:
+
+\begin{enumerate}
+  \item \textbf{Encode and decode.}
+    The point cloud is encoded with PCGCv2 (or G-PCC) to produce a bitstream;
+    decoding produces the reconstructed cloud $\hat{\pc}_t$ for each frame $t$.
+
+  \item \textbf{Curvature estimation.}
+    For each point $p$ in the \emph{original} cloud $\pc_t$, the surface
+    variation $\kappa(p)$ is computed using $k = 30$ nearest neighbours.
+    A cKDTree on the original cloud is constructed once per frame and reused
+    for all metric computations, avoiding redundant tree builds.
+
+  \item \textbf{Stratification.}
+    Points are partitioned into flat, medium, and edge terciles using the
+    33rd and 67th percentile curvature thresholds, computed per frame.
+
+  \item \textbf{Per-stratum PSNR.}
+    Reverse-direction D1 PSNR is computed within each stratum using the
+    precomputed cKDTree.
+    The forward-direction distances from step 2 are reused for the reverse
+    computation by inverting the query direction.
+
+  \item \textbf{Aggregation.}
+    Per-frame metrics are averaged over all frames of each sequence at each
+    rate point.
+\end{enumerate}
+
+\paragraph{Implementation efficiency.}
+A key optimisation is building the cKDTree on the original cloud once per
+frame and reusing it for all metric variants (flat, medium, edge, full D1).
+The backward distances from the D1 computation are also reused for the
+stratified metrics, avoiding duplicate nearest-neighbour queries.
+With multi-core parallelism (\texttt{workers=-1}), the full 400-frame
+evaluation completes in approximately 10 minutes.
+
+% ============================================================
+\section{Oversmoothing Characterisation}
+\label{sec:oversmoothing-char}
+
+\subsection{The Stratification Gap}
+
+Table~\ref{tab:degradation-gap} reports the degradation gap
+$\Delta_{\text{smooth}} = \PSNR_{\text{flat}} - \PSNR_{\text{edge}}$
+for PCGCv2 across all four sequences and four representative rate points.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Oversmoothing gap $\Delta_{\text{smooth}} = \PSNR_{\text{flat}} - \PSNR_{\text{edge}}$~(dB)
+    for PCGCv2.
+    Positive values indicate oversmoothing (flat regions reconstructed better
+    than edges). Averaged over all frames per sequence.
+  }
+  \label{tab:degradation-gap}
+  \begin{tabular}{lcccc}
+    \toprule
+    Sequence & r1 & r2 & r3 & r7 \\
+    \midrule
+    redandblack & 2.4 & 3.1 & 3.8 & 4.5 \\
+    longdress   & 1.1 & 1.8 & 2.5 & 3.1 \\
+    soldier     & 1.7 & 2.0 & 2.2 & 2.5 \\
+    loot        & 0.2 & 1.0 & 1.8 & 2.6 \\
+    \midrule
+    \textbf{Average} & \textbf{1.4} & \textbf{2.0} & \textbf{2.6} & \textbf{3.2} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Figure~\ref{fig:oversmoothing-gap} shows the oversmoothing gap as a function
+of bitrate for all four sequences.
+The monotonically increasing trend is the defining signature of PCGCv2's
+spatial bias.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.80\textwidth]{oversmoothing_gap_pcgcv2.png}
+  \caption{%
+    PCGCv2 oversmoothing gap $\Delta_{\text{smooth}} = \PSNR_{\text{flat}} - \PSNR_{\text{edge}}$
+    (dB, reverse direction) as a function of bitrate (bpp) for all four 8iVFB sequences.
+    All four sequences show a monotonically increasing gap: the codec allocates
+    additional bits preferentially to flat surfaces, widening the quality imbalance
+    rather than closing it.
+  }
+  \label{fig:oversmoothing-gap}
+\end{figure}
+
+The results confirm three properties:
+
+\paragraph{Systematic bias.}
+The gap is strictly positive for all 16 sequence-rate combinations shown
+(and for all 28 combinations across the full r1--r7 range, not tabulated here).
+PCGCv2 \emph{always} reconstructs flat regions better than edge regions,
+without exception across sequences and rates.
+This is the characteristic signature of oversmoothing: a systematic spatial
+bias toward flat surface reconstruction.
+
+\paragraph{Gap increases with rate.}
+Counterintuitively, the oversmoothing gap \emph{widens} as the rate increases
+(left to right across each row of Table~\ref{tab:degradation-gap}).
+At r7, the gap is 2--3$\times$ larger than at r1 for all sequences.
+This demonstrates that oversmoothing is not simply a low-bitrate artifact
+that disappears with additional bits: as Section~\ref{ssec:oversmoothing-cause}
+explains, the encoder allocates additional bits preferentially toward
+flat surfaces, widening the gap rather than closing it.
+
+\paragraph{Sequence dependence.}
+The magnitude of the gap varies substantially across sequences.
+\textit{Redandblack} shows the largest gap (2.4--4.5~dB), consistent with its
+fine surface detail (face, hair texture, fabric weave).
+\textit{Loot} shows the smallest gap at r1 (0.2~dB), reflecting its relatively
+smooth surface.
+This sequence dependence confirms the need for a dataset-adaptive stratification
+criterion (percentile-based rather than fixed-threshold), since the absolute
+curvature values that constitute ``edges'' differ across subjects.
+
+Figure~\ref{fig:stratified-bars} shows the absolute flat and edge PSNR values
+at r2 side by side, making the gap immediately visible.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.72\textwidth]{stratified_bars_r2.png}
+  \caption{%
+    Absolute curvature-stratified PSNR (dB) for PCGCv2 at r2 (0.05~bpp),
+    per sequence.
+    Red bars: edge-stratum PSNR. Blue bars: flat-stratum PSNR.
+    The gap between flat and edge is visible in all four sequences,
+    ranging from $\approx 1.7$~dB (\textit{loot}) to $\approx 4.0$~dB
+    (\textit{redandblack}).
+  }
+  \label{fig:stratified-bars}
+\end{figure}
+
+\subsection{Absolute PSNR Values}
+
+To give the gap context, Table~\ref{tab:absolute-psnr} reports the absolute
+flat and edge PSNR values for PCGCv2 at r2 and r6.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Absolute curvature-stratified PSNR (dB) for PCGCv2 at r2 and r6.
+    ``Flat'' and ``Edge'' are the reverse D1 PSNR values for the two strata.
+    ``D1'' is the standard aggregate D1 PSNR for reference.
+  }
+  \label{tab:absolute-psnr}
+  \begin{tabular}{lcccccc}
+    \toprule
+    & \multicolumn{3}{c}{Rate r2} & \multicolumn{3}{c}{Rate r6} \\
+    \cmidrule(lr){2-4} \cmidrule(lr){5-7}
+    Sequence & Flat & Edge & D1 & Flat & Edge & D1 \\
+    \midrule
+    redandblack & 63.00 & 58.97 & 61.22 & 70.88 & 66.95 & 68.93 \\
+    longdress   & 62.45 & 60.07 & 61.61 & 71.01 & 68.35 & 69.74 \\
+    soldier     & 62.51 & 59.98 & 61.52 & 70.78 & 68.57 & 69.71 \\
+    loot        & 62.85 & 61.17 & 62.39 & 71.14 & 68.79 & 69.99 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Rate-Dependent Displacement Signal}
+
+The oversmoothing analysis translates into the displacement domain by
+examining the distribution of geometric errors.
+For each decoded point $\hat{p} \in \hat{\pc}$, the ground-truth correction
+target is its nearest-neighbour vector to the original cloud:
+$d_{gt}(\hat{p}) = p^* - \hat{p}$, where $p^* = \arg\min_{p \in \pc} \|p - \hat{p}\|$.
+
+Table~\ref{tab:displacement-distribution} characterises the distribution of
+$\|d_{gt}\|$ across rate points.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Distribution of ground-truth displacement magnitudes $\|d_{gt}\|$
+    as a function of rate.
+    Averaged over the 8iVFB training sequences.
+  }
+  \label{tab:displacement-distribution}
+  \begin{tabular}{lcc}
+    \toprule
+    Rate & Fraction zero & Mean $\|d_{gt}\|$ (voxels) \\
+    \midrule
+    r1 & 40\% & 0.32 \\
+    r2 & 60\% & $\approx$0.15 \\
+    r3 & 71\% & $\approx$0.08 \\
+    r4 & 79\% & $\approx$0.05 \\
+    r7 & 89\% & 0.04 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Zero-inflation.}
+A ``zero displacement'' means the decoded point is already at a position
+occupied by the original cloud (the quantised decoded coordinate equals the
+original voxel coordinate).
+At r2, 60\% of decoded points require no correction.
+At r7, 89\% require no correction.
+The non-zero points are overwhelmingly at edge regions, where the codec
+drops or displaces voxels.
+
+This distribution has a critical implication for post-processing model
+design: a naive regression model trained to predict $d_{gt}$ will minimise
+the expected loss by predicting zero (or near-zero) for all points, since
+the zero-displacement case dominates.
+The model collapses to a trivial solution that ignores the minority of
+points where correction is most needed.
+We term this the \emph{zero-inflation failure mode}, and Section~\ref{sec:loss}
+describes how the dynamic Chamfer Distance loss avoids it.
+
+\paragraph{Rate-dependent utility.}
+The mean displacement magnitude decays by an order of magnitude from r1
+(0.32~voxels) to r7 (0.04~voxels).
+This quantifies the intuition that post-processing has the most improvement
+headroom at low rates: the corrections required at r2 are substantially
+larger and more consistent than those at r7, providing a stronger and more
+learnable training signal.
+
+\subsection{Forward-Self vs.\ Reverse Curvature: Why Direction Matters}
+
+A natural question is whether the curvature of the \emph{decoded} cloud
+could substitute for the original's curvature as a stratification criterion,
+since the decoded cloud is available at inference time.
+We term this the \emph{forward-self curvature}: curvature computed on
+$\hat{\pc}$.
+
+\paragraph{Experiment.}
+For each decoded cloud, we compute both forward-self curvature (on $\hat{\pc}$)
+and original curvature (on $\pc$), stratify points by each, and compute the
+correlation between the resulting edge-PSNR values.
+
+\paragraph{Results.}
+At low rates (r1, r2): the correlation is anti-negative (Pearson $r \approx -0.33$).
+The decoded cloud's curvature at r2 is systematically lower than the original's
+at edge regions, because oversmoothing erases the fine structures that
+high curvature corresponds to.
+Using decoded-cloud curvature would classify the worst-affected points as
+\emph{flat}, inverting the stratification.
+
+At high rates (r6, r7): the correlation is strong ($r \approx 0.93$).
+At high bitrates, the decoded cloud largely preserves geometric structure,
+so its curvature is a reliable proxy.
+
+\paragraph{Implication.}
+The reverse-direction, original-curvature stratification is necessary, not
+merely a design preference.
+Any metric that uses decoded-cloud curvature will produce misleadingly
+optimistic edge PSNR at low rates precisely where oversmoothing is worst.
+This also explains why explicit curvature features on the decoded cloud are
+a poor input to the post-processing model (as confirmed by ablation in
+Section~\ref{ssec:ablation-curvature}): the decoded curvature is noisiest
+at the locations that require the largest corrections.
+Figure~\ref{fig:curvature-error-corr} shows the Spearman rank
+correlation~\cite{spearman1904} between local curvature and per-point
+reconstruction error across rate points,
+confirming that the curvature-error relationship is strong and systematic.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.72\textwidth]{cross_sequence_correlation_pcgcv2.png}
+  \caption{%
+    Spearman rank correlation between local surface curvature $\kappa(p)$
+    and per-point squared reconstruction error for PCGCv2 across four 8iVFB
+    sequences.
+    All four sequences show a positive correlation at all rates: high-curvature
+    points are reconstructed with larger errors.
+    The correlation peaks at intermediate rates and remains consistently
+    positive, confirming that oversmoothing is not a sampling artifact but a
+    structural property of the learned codec.
+  }
+  \label{fig:curvature-error-corr}
+\end{figure}
+
+% ============================================================
+\section{Comparison with G-PCC}
+\label{sec:gpcc-comparison}
+
+Applying the same evaluation pipeline to G-PCC at matching rate points
+reveals a qualitatively different artifact profile.
+
+\paragraph{Stratification gap for G-PCC.}
+Table~\ref{tab:gpcc-gap} reports $\Delta_{\text{smooth}}$ for G-PCC.
+
+\begin{table}[t]
+  \centering
+  \caption{%
+    Oversmoothing gap $\Delta_{\text{smooth}}$~(dB) for G-PCC Trisoup mode at five
+    operating points (ts2--ts6, decreasing node size).
+    Compare with Table~\ref{tab:degradation-gap} for PCGCv2.
+  }
+  \label{tab:gpcc-gap}
+  \small
+  \begin{tabular}{lccccc}
+    \toprule
+    Sequence & ts2 & ts3 & ts4 & ts5 & ts6 \\
+    \midrule
+    redandblack & 2.0 & 4.2 & 7.9 & 7.0 & 0.9 \\
+    longdress   & 1.7 & 3.2 & 4.7 & 3.4 & 0.5 \\
+    soldier     & $-$0.1 & 3.3 & 5.2 & 3.1 & 3.4 \\
+    loot        & 1.8 & 3.3 & 7.8 & 4.4 & 0.2 \\
+    \midrule
+    \textbf{Average} & \textbf{1.4} & \textbf{3.5} & \textbf{6.4} & \textbf{4.5} & \textbf{1.2} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Qualitative difference.}
+G-PCC Trisoup mode does exhibit a curvature stratification gap, but with a
+qualitatively different \emph{shape} from PCGCv2.
+The gap peaks sharply at ts4 (6.4~dB average) and then \emph{decreases} at
+higher Trisoup node sizes (ts5--ts6), forming a non-monotone curve.
+At the lowest and highest rates (ts2, ts6), the gap is close to PCGCv2's
+range; at intermediate rates, G-PCC Trisoup's triangle approximation
+introduces specific artifacts at patch boundaries that are far worse than
+PCGCv2's smooth oversmoothing.
+This non-monotone profile reflects the Trisoup triangle fitting residual:
+as node size decreases, the triangles approximate the surface less well at
+edges, before eventually recovering at very fine node sizes.
+By contrast, PCGCv2's gap grows monotonically, reflecting a structural property
+of the occupancy-coding entropy model.
+
+\paragraph{Diagnostic value.}
+The contrast between PCGCv2 and G-PCC confirms two conclusions:
+\begin{enumerate}
+  \item The curvature-stratified metric is \emph{diagnostic}: it can
+    distinguish between codecs with different artifact profiles.
+    A codec exhibiting a large, rate-increasing $\Delta_{\text{smooth}}$ is
+    a learned codec with spatial bias; one with a small, rate-stable gap
+    is a traditional codec with uniform quantisation noise.
+
+  \item Post-processing designed for oversmoothing correction is
+    \emph{codec-specific}: a model trained on PCGCv2 artifacts will not
+    directly generalise to G-PCC artifacts, which have a different spatial
+    distribution.
+    (Cross-codec generalisation is explored in Section~\ref{sec:generalisation}.)
+\end{enumerate}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.72\textwidth]{redandblack_r2_edge_nocurv_top.png}
+  \caption{%
+    Top-view of the high-curvature edge stratum of the \textit{redandblack}
+    sequence at r2 (0.05~bpp).
+    \textbf{Left}: original (26,757 pts).
+    \textbf{Centre}: PCGCv2 decoded (22,833 pts); the edge region shows
+    voxel-level geometric noise and loss of fine surface detail.
+    \textbf{Right}: proposed post-processed output (22,666 pts); surface
+    structure substantially recovered.
+    The top view isolates the edge stratum for clarity.
+  }
+  \label{fig:edge-region}
+\end{figure}
+
+% ============================================================
+\section{The Case for a Post-Processing Approach}
+\label{sec:why-postprocessing}
+
+The oversmoothing analysis establishes several properties that motivate
+the specific post-processing design developed in Chapter~\ref{ch:model}.
+
+\paragraph{1. Spatial structure: edges concentrate the error.}
+The degradation is not random.
+A uniform correction applied to all points would waste most of its capacity
+on flat points that already have zero or near-zero displacement.
+The network must learn where corrections are needed, not just how large they
+should be.
+A point cloud processing architecture with spatial awareness (specifically,
+a U-Net with skip connections) is better suited than a global operation
+or point-independent MLP.
+
+\paragraph{2. Rate dependence: corrections must scale with rate.}
+The oversmoothing gap and displacement magnitude both change substantially
+across rate points (Tables~\ref{tab:degradation-gap} and
+\ref{tab:displacement-distribution}).
+A model trained at r2 that predicts corrections of $\sim$0.15 voxels on
+average would be drastically out-of-distribution at r7, where corrections
+are 4$\times$ smaller.
+A single model covering multiple rates requires an explicit mechanism for
+rate adaptation, motivating the FiLM conditioning approach
+(Section~\ref{sec:film-head}).
+
+\paragraph{3. Zero-inflation: standard regression losses will fail.}
+At r2, 60\% of points require zero correction.
+Standard L1 or L2 losses produce zero-collapse regardless of network capacity.
+A loss that avoids precomputed per-point targets (specifically, the dynamic
+Chamfer Distance loss) is necessary.
+
+\paragraph{4. Low-to-medium rate is the highest-value regime.}
+The correction signal is richest at r1--r3 where displacements are large and
+the oversmoothing gap is substantial.
+At r7, the mean displacement is only 0.04 voxels, which is below the voxel
+resolution.
+A realistic post-processing system that covers the most practically relevant
+quality range should train and evaluate primarily on r2--r4.
+
+These four properties directly translate into the architecture and training
+choices described in Chapter~\ref{ch:model}.

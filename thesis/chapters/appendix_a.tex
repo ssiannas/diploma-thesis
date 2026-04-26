@@ -1,0 +1,328 @@
+% ============================================================
+%  Appendix A -- Implementation Details and Configuration
+% ============================================================
+\chapter{Implementation Details}
+\label{app:implementation}
+
+This appendix provides implementation details, hyperparameter configurations,
+and dataset statistics that complement the main text.
+
+% ============================================================
+\section{Codebase Structure}
+\label{app:codebase}
+
+The complete implementation is organised into four top-level packages:
+
+\paragraph{\texttt{pcml/}.}
+Core library containing:
+\begin{itemize}
+  \item \texttt{pcml/adapters/} --- Framework adapters (PCGCv2, G-PCC,
+    pcc\_geo\_cnn\_v2). Each adapter wraps the corresponding codec via subprocess
+    isolation, so each codec runs in its own conda environment with compatible
+    dependencies. The \texttt{BaseAdapter} interface exposes
+    \texttt{encode()}, \texttt{decode()}, and \texttt{get\_bpp()} methods.
+
+  \item \texttt{pcml/metrics/} --- Quality metrics (\texttt{quality.py}: D1-PSNR,
+    D2-PSNR, Chamfer Distance using \texttt{scipy.spatial.cKDTree};
+    \texttt{curvature.py}: PCA-based curvature estimation, curvature histograms,
+    stratified PSNR).
+
+  \item \texttt{pcml/data/} --- Dataset loaders for PLY files and decoded cloud
+    manifests.
+
+  \item \texttt{pcml/visualization/} --- Rate-distortion curve plotting, spatial
+    error visualisation.
+\end{itemize}
+
+\paragraph{\texttt{postprocessing/}.}
+Post-processing model:
+\begin{itemize}
+  \item \texttt{model.py} --- \texttt{FiLMHeadSparseUNetV2} architecture
+    (final model), plus earlier \texttt{FiLMSparseUNet}, \texttt{GatedSparseUNet},
+    \texttt{ThresholdGatedUNet} (retained for reference).
+  \item \texttt{losses.py} --- \texttt{dynamic\_chamfer\_loss} (production),
+    plus earlier \texttt{L1DisplacementLoss}, \texttt{CurvatureWeightedL1},
+    \texttt{MinKLoss}, \texttt{StratifiedLoss} (historical).
+  \item \texttt{dataset.py} --- \texttt{MultiFrameDataset}: reads decoded cloud
+    manifests, applies 48-element cube symmetry augmentation.
+  \item \texttt{train.py} --- Training loop with AdamW + warm-up + cosine
+    annealing. Supports multi-rate joint training with configurable weights.
+  \item \texttt{inference.py} --- Sliding-window inference over full clouds.
+    Handles patch overlap, aggregates displacements by averaging.
+\end{itemize}
+
+\paragraph{\texttt{scripts/}.}
+Organised by function:
+\begin{itemize}
+  \item \texttt{scripts/setup/} --- Environment setup, dataset symlinks,
+    verification.
+  \item \texttt{scripts/analysis/} --- Curvature histograms, displacement
+    distribution analysis, oversmoothing characterisation.
+  \item \texttt{scripts/benchmark/} --- Single-frame and multi-frame codec
+    benchmarking.
+  \item \texttt{scripts/evaluation/} --- Full-dataset evaluation pipeline
+    (\texttt{eval\_full\_dataset.py}, \texttt{compute\_all\_metrics.py},
+    \texttt{run\_full\_pipeline.sh}).
+  \item \texttt{scripts/plotting/} --- Figure generation for the paper and thesis.
+\end{itemize}
+
+\paragraph{\texttt{configs/}.}
+YAML configuration files for all training runs. Production config:
+\texttt{configs/cls\_v1\_r2.yaml} (v10-nocurv, r2+r4+r6 joint training).
+
+% ============================================================
+\section{PCGCv2 Codec Configuration}
+\label{app:codec-config}
+
+PCGCv2 is run in its default multi-scale configuration.
+Table~\ref{tab:codec-config} lists the compression rates used throughout
+this work, with the corresponding quantisation step sizes and measured
+bitrates on the 8iVFB dataset.
+
+\begin{table}[h]
+  \centering
+  \caption{%
+    PCGCv2 compression rates and measured bitrates (bpp) on the 8iVFB
+    dataset (average over all four sequences and 100 frames each).
+  }
+  \label{tab:codec-config}
+  \small
+  \begin{tabular}{ccc}
+    \toprule
+    \textbf{Rate Index} & \textbf{Quantisation Step} & \textbf{Avg BPP} \\
+    \midrule
+    r1 & 1 & $\approx 0.025$ \\
+    r2 & 2 & $\approx 0.050$ \\
+    r3 & 3 & $\approx 0.080$ \\
+    r4 & 4 & $\approx 0.150$ \\
+    r5 & 5 & $\approx 0.200$ \\
+    r6 & 6 & $\approx 0.300$ \\
+    r7 & 7 & $\approx 0.450$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Note that BPP values vary with sequence and frame due to differences in
+point cloud size and geometric complexity.
+The values above are approximate averages.
+The FiLM head uses the actual per-cloud BPP as the conditioning scalar
+at both training and inference time, not the nominal rate index.
+
+% ============================================================
+\section{Training Hyperparameters}
+\label{app:hyperparams}
+
+Table~\ref{tab:hyperparams} lists the complete set of hyperparameters used
+to train the final v10-nocurv model.
+
+\begin{table}[h]
+  \centering
+  \caption{Complete training hyperparameter configuration (v10-nocurv model).}
+  \label{tab:hyperparams}
+  \small
+  \begin{tabular}{lll}
+    \toprule
+    \textbf{Category} & \textbf{Hyperparameter} & \textbf{Value} \\
+    \midrule
+    \multirow{4}{*}{Data} &
+      Training sequences & longdress, loot, soldier \\
+    & Validation sequence & redandblack \\
+    & Frame stride & 12 (every 12th frame) \\
+    & Training clouds per rate & $\approx 75$ (3 seq. $\times$ 25 frames) \\
+    \midrule
+    \multirow{4}{*}{Patches} &
+      Patch size & $64^3$ voxels \\
+    & Patch stride & 32 (50\% overlap) \\
+    & Min points per patch & 10 \\
+    & Augmentation & 48 cube symmetries \\
+    \midrule
+    \multirow{5}{*}{Optimiser} &
+      Algorithm & AdamW \\
+    & Learning rate ($\eta$) & $10^{-3}$ \\
+    & Weight decay ($\lambda$) & $10^{-4}$ \\
+    & Momentum ($\beta_1, \beta_2$) & 0.9, 0.999 \\
+    & Gradient clipping & None \\
+    \midrule
+    \multirow{4}{*}{Schedule} &
+      Total epochs & 30 \\
+    & Warm-up epochs & 3 (linear, $10^{-5} \to 10^{-3}$) \\
+    & Annealing epochs & 27 (cosine, $10^{-3} \to 10^{-6}$) \\
+    & Best checkpoint & Epoch 24 (min validation loss) \\
+    \midrule
+    \multirow{4}{*}{Loss} &
+      Loss function & Symmetric Chamfer Distance \\
+    & Boundary padding & 0 (no padding) \\
+    & Rate weights & $[w_{r2}, w_{r4}, w_{r6}] = [1.0, 0.3, 0.05]$ \\
+    & Batch size & 8 patches \\
+    \midrule
+    \multirow{4}{*}{Architecture} &
+      Input channels & 3 (normalised $xyz$) \\
+    & Backbone channels & 32 / 64 / 128 / 64 / 32 \\
+    & FiLM MLP & Linear(1,64) + ReLU + Linear(64,64) \\
+    & Output & $5 \cdot \tanh(\Delta) \in [-5,5]^3$ \\
+    \midrule
+    \multirow{3}{*}{Hardware} &
+      GPU & NVIDIA RTX 3090 (24 GB VRAM) \\
+    & CPU & 12 cores / 24 threads \\
+    & RAM & 64 GB \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% ============================================================
+\section{8iVFB Dataset Statistics}
+\label{app:dataset}
+
+The 8iVFB~\cite{8ivfb} (8i Voxelized Full Bodies) dataset contains
+four volumetric video sequences of human subjects, captured at 10 fps
+and voxelized at resolution $G = 1024$:
+\textit{longdress}, \textit{loot}, \textit{redandblack}, and \textit{soldier}.
+
+Table~\ref{tab:dataset-stats} summarises the dataset statistics.
+
+\begin{table}[h]
+  \centering
+  \caption{%
+    8iVFB dataset statistics (averages over the first 100 frames per sequence
+    at the original resolution $G = 1024$).
+  }
+  \label{tab:dataset-stats}
+  \small
+  \begin{tabular}{lcccc}
+    \toprule
+    \textbf{Sequence} & \textbf{Frames} &
+    \textbf{Avg Points} & \textbf{Avg High-$\kappa$\%} & \textbf{Subject} \\
+    \midrule
+    longdress   & 300 & $\approx 857\,000$ & $\approx 33\%$ & Female, dress \\
+    loot        & 300 & $\approx 805\,000$ & $\approx 33\%$ & Male, casual \\
+    redandblack & 300 & $\approx 757\,000$ & $\approx 33\%$ & Male, T-shirt \\
+    soldier     & 300 & $\approx 1\,089\,000$ & $\approx 33\%$ & Male, uniform \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The high-curvature fraction (top third of points by PCA curvature $\kappa$)
+is approximately 33\% by construction of the stratification (tertile split).
+The dataset was licensed from 8i Labs and is available at the MPEG content
+repository.
+
+For training, we use frames 1--300 of \textit{longdress}, \textit{loot},
+and \textit{soldier}, with frame stride 12 (25 frames per sequence).
+\textit{redandblack} is held out entirely for validation and evaluation.
+For the full 400-frame evaluation, we use 100 frames from each sequence
+(sampled with stride 3 from frames 1--300).
+
+% ============================================================
+\section{Evaluation Pipeline}
+\label{app:eval-pipeline}
+
+The evaluation pipeline consists of three stages:
+
+\paragraph{Stage 1: Inference.}
+\texttt{eval\_full\_dataset.py --infer\_only} runs the post-processing model
+on all 400 frames $\times$ 3 rates using GPU-accelerated sliding-window
+inference.
+Refined clouds are saved as \texttt{.npy} files
+(format: $N \times 3$ float32).
+With 399 cached frames and 1 new inference, this stage takes $\approx 8$ seconds.
+For a full cold run (no cache), the estimated time is $\approx 30$ minutes.
+
+\paragraph{Stage 2: Metric computation.}
+\texttt{compute\_all\_metrics.py} computes D1-PSNR, flat D1-PSNR, and edge
+D1-PSNR for each frame.
+Key optimisations:
+\begin{itemize}
+  \item \texttt{cKDTree(original)} is built once per frame and reused for all
+    three metric types (forward distances), saving $\approx 3\times$ tree
+    construction time.
+  \item \texttt{rev\_sq\_dists} (backward distances, from original to decoded/refined)
+    are computed once for D1 and reused for the stratified metric.
+  \item \texttt{workers=-1} enables multi-core parallelism across frames.
+\end{itemize}
+Average throughput: $\approx 3$ seconds per frame.
+Total for 400 frames: $\approx 20$ minutes per rate.
+
+\paragraph{Stage 3: Aggregation.}
+\texttt{run\_full\_pipeline.sh} orchestrates Stages 1--2 in parallel across
+the 3 rates and merges the per-rate CSVs into a single
+\texttt{nocurv\_ep24\_all.csv} with 1200 rows.
+
+% ============================================================
+\section{Software Dependencies}
+\label{app:dependencies}
+
+Table~\ref{tab:dependencies} lists the key software dependencies.
+
+\begin{table}[h]
+  \centering
+  \caption{Key software dependencies for the \texttt{pcgcv2} conda environment.}
+  \label{tab:dependencies}
+  \small
+  \begin{tabular}{lll}
+    \toprule
+    \textbf{Package} & \textbf{Version} & \textbf{Purpose} \\
+    \midrule
+    Python & 3.8 & Runtime \\
+    PyTorch & 1.10.1+cu113 & Deep learning framework \\
+    MinkowskiEngine & 0.5.4 & Sparse convolution \\
+    CUDA & 11.3 & GPU acceleration \\
+    GCC/G++ & 10.x & MinkowskiEngine compilation \\
+    NumPy & 1.21 & Array operations \\
+    SciPy & 1.7 & cKDTree for nearest-neighbour \\
+    Open3D & 0.13 & Point cloud I/O \\
+    PyYAML & 5.4 & Configuration files \\
+    tqdm & 4.62 & Progress bars \\
+    pandas & 1.3 & CSV result aggregation \\
+    \midrule
+    PCGCv2 & --- & Learned codec (git submodule) \\
+    mpeg-pcc-tmc13 & --- & G-PCC codec (git submodule) \\
+    pcc\_geo\_cnn\_v2 & --- & Alternative codec (git submodule) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+MinkowskiEngine must be built from source with CUDA 11.3 and GCC $\leq$ 10.
+The \texttt{scripts/setup/setup\_conda\_env.sh} script automates this process,
+including detecting the CUDA version and selecting the correct GCC.
+
+% ============================================================
+\section{Displacement Distribution at Each Rate}
+\label{app:displacement}
+
+Table~\ref{tab:displacement-full} provides the full displacement statistics
+at all seven PCGCv2 rates for a representative 8iVFB sequence (\textit{redandblack}).
+These statistics motivate the multi-rate training strategy and the static
+rate weights.
+
+\begin{table}[h]
+  \centering
+  \caption{%
+    Displacement statistics (GT nearest-neighbour displacement magnitude
+    $\|d_{gt}(\hat{p}_i)\|$ in voxels) at each PCGCv2 rate for the
+    \textit{redandblack} sequence, averaged over 10 representative frames.
+    ``Zero fraction'' is the fraction of points with $\|d_{gt}\| = 0$.
+  }
+  \label{tab:displacement-full}
+  \small
+  \begin{tabular}{cccc}
+    \toprule
+    \textbf{Rate} & \textbf{Mean $\|d_{gt}\|$} &
+    \textbf{90th pct.} & \textbf{Zero fraction} \\
+    \midrule
+    r1 & 0.32 & 1.41 & 40\% \\
+    r2 & 0.15 & 1.06 & 60\% \\
+    r3 & 0.09 & 0.82 & 71\% \\
+    r4 & 0.06 & 0.62 & 79\% \\
+    r5 & 0.05 & 0.50 & 83\% \\
+    r6 & 0.04 & 0.38 & 87\% \\
+    r7 & 0.02 & 0.21 & 89\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The table shows clearly why training at r7 is unproductive: 89\% zero targets
+with mean displacement 0.02 voxels (below quantization resolution) leave
+essentially no learnable signal.
+The three training rates r2, r4, r6 span the range where correction is both
+needed (non-trivial zero fraction) and feasible (sub-voxel mean displacement
+within the model's $\pm5$-voxel output bound).

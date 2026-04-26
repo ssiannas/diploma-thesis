@@ -1,0 +1,55 @@
+\section{Qualitative Analysis}
+\label{sec:qualitative}
+
+Figures~\ref{fig:qualitative-soldier}--\ref{fig:qualitative-3d} present
+qualitative comparisons showing the geometric improvement produced by the
+post-processor.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{soldier_vis.png}
+  \caption{%
+    \textit{Soldier} sequence, r2 (0.05~bpp).
+    \textbf{Left}: original (79,529 pts).
+    \textbf{Centre}: PCGCv2 decoded (76,058 pts): surface protrusions and
+    structural boundaries are smoothed away.
+    \textbf{Right}: proposed post-processed output (76,058 pts): fine
+    geometric structure substantially recovered at helmet, shoulder hardware,
+    and facial boundaries.
+    Point count is preserved by construction.
+  }
+  \label{fig:qualitative-soldier}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{soldier_3d_nocurv_ep24_r2.png}
+  \caption{%
+    \textit{Soldier} sequence 3D view, r2 (0.05~bpp).
+    \textbf{Left}: original.
+    \textbf{Centre}: PCGCv2 decoded: surface geometry is noticeably blurred
+    at fine structures.
+    \textbf{Right}: proposed: surface sharpness partially recovered.
+  }
+  \label{fig:qualitative-3d}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{redandblack_3d_nocurv_ep24_az10_r2.png}
+  \caption{%
+    \textit{Redandblack} sequence, 3D view at r2 (0.05~bpp).
+    \textbf{Left}: original.
+    \textbf{Centre}: PCGCv2 decoded: clothing texture and body contours
+    are smoothed.
+    \textbf{Right}: proposed: detail partially recovered across the surface.
+  }
+  \label{fig:qualitative-redandblack}
+\end{figure}
+
+The qualitative improvement is concentrated at geometric boundaries and surface
+structures (helmet visor, shoulder hardware, clothing texture).
+The overall body shape is unchanged; the model applies corrections at
+high-curvature regions rather than globally rescaling the point cloud.
+
+% ============================================================

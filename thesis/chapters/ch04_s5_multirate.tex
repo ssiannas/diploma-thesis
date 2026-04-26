@@ -1,0 +1,62 @@
+\section{Multi-Rate Training and Rate Weighting}
+\label{sec:multi-rate}
+
+\subsection{Joint Multi-Rate Training}
+
+The model is trained jointly on data from three rate points: r2, r4, and r6.
+At each training step, a mini-batch of patches is assembled from the decoded
+clouds at all three rates; the rate scalar $r_k = \log_2(\bpp_k)$ is passed
+to the FiLM head for each sample $k$.
+The total loss is a weighted sum:
+\begin{equation}
+  \mathcal{L}_{\text{total}} =
+    w_2 \mathcal{L}_{\text{CD}}^{(r2)}
+    + w_4 \mathcal{L}_{\text{CD}}^{(r4)}
+    + w_6 \mathcal{L}_{\text{CD}}^{(r6)},
+\end{equation}
+where $w_2, w_4, w_6 > 0$ are rate weights.
+
+\subsection{Rate Weight Design}
+
+The choice of weights is non-trivial.
+Table~\ref{tab:displacement-distribution} shows that the displacement signal
+(mean $\|d_{gt}\|$) decays from r2 to r6 by a factor of $\approx 3$.
+This means the Chamfer Distance loss at r6 is intrinsically smaller than at r2,
+even for a perfect correction.
+Without explicit weighting, the gradient budget would be skewed toward r2
+automatically; explicit weights control this balance.
+
+\paragraph{Static weights.}
+We use $[w_2, w_4, w_6] = [1.0, 0.3, 0.05]$, assigning most gradient budget
+to r2 where the displacement signal is richest and the improvement headroom
+is largest.
+The rationale: at r6, the geometric correction required is so small that the
+gradient contribution is weak regardless of weighting; aggressively upweighting
+r6 would not help the r6 predictions while degrading r2 by redirecting gradient
+budget away from the most learnable rate.
+
+\paragraph{Why alternative schemes fail.}
+Two principled alternatives were evaluated (ablation in
+Section~\ref{ssec:ablation-weighting}):
+\begin{itemize}
+  \item \textit{Kendall uncertainty weighting~\cite{kendall2018multi}}:
+    learns weights $w_k \propto 1/\sigma_k^2$ where $\sigma_k$ is a per-task
+    uncertainty parameter.
+    In practice, the highest-loss task (r2) is interpreted as highest-uncertainty
+    and \emph{downweighted}: weights collapse to the inverted ordering
+    $[w_2, w_4, w_6] \approx [0.1, 0.3, 0.6]$ within 5 epochs.
+    This is the opposite of the correct inductive bias.
+
+  \item \textit{Dynamic detached weighting}:
+    weights proportional to current loss magnitude, normalised and clamped.
+    Converges quickly to a nearly static ratio $\approx [1.27, 0.91, 0.82]$
+    because all rates improve at proportional rates (the shared backbone
+    prevents decoupled learning dynamics between rates).
+    Marginally worse than static weights.
+\end{itemize}
+
+The conclusion is that the static weights $[1.0, 0.3, 0.05]$ encode the
+correct inductive prior --- most budget to r2 --- and no adaptive scheme
+tested can recover a better solution from this regime.
+
+% ============================================================

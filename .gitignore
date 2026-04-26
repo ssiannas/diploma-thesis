@@ -126,3 +126,36 @@ paper/*.pdf
 # Large paper figures (>500KB, stored separately)
 paper/figures/*.png
 paper/figures/*.jpg
+
+# Thesis build artifacts and large binaries
+thesis/*.aux
+thesis/*.bbl
+thesis/*.blg
+thesis/*.fdb_latexmk
+thesis/*.fls
+thesis/*.log
+thesis/*.lof
+thesis/*.lot
+thesis/*.out
+thesis/*.pdf
+thesis/*.synctex.gz
+thesis/*.toc
+thesis/*.xdv
+thesis/figures/*.png
+thesis/figures/*.jpg
+thesis/figures_paper/
+*.ΔΙΠΛ*.pdf
+ΣΙΑΝΝΑΣ*.pdf
+
+# Presentation build artifacts
+presentation/*.aux
+presentation/*.fdb_latexmk
+presentation/*.fls
+presentation/*.log
+presentation/*.nav
+presentation/*.out
+presentation/*.pdf
+presentation/*.snm
+presentation/*.synctex.gz
+presentation/*.toc
+presentation/*.xdv
